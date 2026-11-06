@@ -1,0 +1,28 @@
+;;; core/settings.el 
+
+(setq inhibit-splash-screen t)
+(setq ring-bell-function #'ignore)
+(setq custom-file ".emacs.custom.el")
+(setq-default truncate-lines t)
+(setq tab-width 4)
+
+;; Allow horizontal scrolling with trackpad/scroll wheel
+(setq mouse-wheel-tilt-scroll t
+      mouse-wheel-flip-direction t)
+
+(set-face-attribute 'default nil
+                    :family "JetBrains Mono"
+                    :height 110)
+(ido-mode 1)
+(menu-bar-mode -1)
+(tool-bar-mode -1)
+(scroll-bar-mode -1)
+(electric-indent-mode 1)
+(pixel-scroll-precision-mode 1)
+(global-display-line-numbers-mode)
+
+(put 'dired-find-alternate-file 'disabled nil)
+
+(provide 'settings)
+
+;;; settings.el ends here

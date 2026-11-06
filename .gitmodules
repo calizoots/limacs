@@ -1,0 +1,3 @@
+[submodule "lisp/extpkgs/emacs-presence"]
+	path = lisp/extpkgs/emacs-presence
+	url = https://github.com/richardhbtz/emacs-rpc
