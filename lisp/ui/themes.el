@@ -92,7 +92,7 @@
     (message "added %s theme" theme)))
 
 (defun my/load-theme (theme)
-  "disable current theme(s) and load a specified new theme from my/themes list."
+  "Disable current theme(s) and load a specified new theme from my/themes list."
   (interactive
    (list (intern (completing-read "theme: " my/themes))))
   (mapc #'disable-theme custom-enabled-themes)

@@ -1,4 +1,6 @@
-;; ui/tabs.el --- JetBrains-style project tabs  -*- lexical-binding: t; -*-
+;;; ui/tabs.el  -*- lexical-binding: t; -*-
+
+;; JetBrains-style project tabs
 
 ;; One tab bar across the top.  Each tab is a workspace with its own window
 ;; layout; tabs linked to a project (see editor/projects.el) show the project
@@ -15,8 +17,7 @@
 
 (use-package all-the-icons :ensure t)
 
-;; ---------------------------------------------------------------------
-;; Settings
+;;; settings
 ;; ---------------------------------------------------------------------
 
 (defvar my/tab-height 34        "Tab height in pixels.")
@@ -40,8 +41,7 @@
 
 (tab-bar-mode 1)
 
-;; ---------------------------------------------------------------------
-;; Color helpers
+;;; color helpers
 ;; ---------------------------------------------------------------------
 
 (defun my/tab--rgb (color)
@@ -72,16 +72,16 @@
   (let ((c (face-attribute face attr nil t)))
     (if (my/tab--rgb c) (my/tab--hex c) fallback)))
 
-;; Palette, filled in by `my/tab-apply-theme'.
+;; palette, filled in by `my/tab-apply-theme'
 (defvar my/tab--c-active "#1e1f22")   ; active tab = editor background
 (defvar my/tab--c-strip  "#2b2d30")   ; bar behind the tabs
 (defvar my/tab--c-fg     "#dfe1e5")   ; active label
 (defvar my/tab--c-dim    "#9da0a8")   ; inactive label
 (defvar my/tab--c-accent "#3574f0")   ; active tab underline
 (defvar my/tab--c-border "#1e1f22")   ; hairline under the strip
+(defvar my/tab--c-running "#5fb85f")  ; dot shown while a project process runs
 
-;; ---------------------------------------------------------------------
-;; Font metrics
+;;; font metrics
 ;; ---------------------------------------------------------------------
 
 (defun my/tab--font-family ()
@@ -101,8 +101,7 @@
                 (string-pixel-width (propertize string 'face 'default))
               (* (string-width string) (frame-char-width))))))
 
-;; ---------------------------------------------------------------------
-;; SVG pieces
+;;; SVG pieces
 ;; ---------------------------------------------------------------------
 
 (defvar my/tab--image-cache (make-hash-table :test #'equal))
@@ -146,8 +145,7 @@
            (color (and inherit (my/tab--face-color inherit :foreground nil))))
       (and family (list (substring-no-properties icon) family color)))))
 
-;; ---------------------------------------------------------------------
-;; What a tab shows
+;;; what a tab shows
 ;; ---------------------------------------------------------------------
 
 (defun my/tab--project (tab)
@@ -184,8 +182,7 @@
     (let ((buf (get-buffer (alist-get 'name (cdr tab)))))
       (and buf (buffer-file-name buf) (buffer-modified-p buf)))))
 
-;; ---------------------------------------------------------------------
-;; Tab rendering
+;;; tab rendering
 ;; ---------------------------------------------------------------------
 
 (defun my/tab-render (tab)
@@ -203,6 +200,8 @@
          (icon-w   (if icon (round (* icon-px 1.15)) 0))
          (label-x  (+ my/tab-hpad (if icon (+ icon-w my/tab-gap) 0)))
          (body-w   (+ label-x (my/tab--text-width label) 6))
+         (running  (and project (fboundp 'my/run-running-count)
+                        (> (my/run-running-count (plist-get project :root)) 0)))
          (icon-color (cond ((null icon) nil)
                            (project (if active my/tab--c-accent my/tab--c-dim))
                            (t (or (nth 2 icon) fg))))
@@ -214,6 +213,11 @@
                            (+ my/tab-hpad (/ icon-w 2.0)) (my/tab--baseline icon-px)
                            (xml-escape-string (nth 1 icon)) icon-px icon-color
                            (xml-escape-string (nth 0 icon))))
+                 ;; green dot on the icon while a project process runs
+                 (when (and icon running)
+                   (format "<circle cx='%.1f' cy='%.1f' r='3.2' fill='%s' stroke='%s' stroke-width='1.5'/>"
+                           (+ my/tab-hpad icon-w -1.5) (+ (/ my/tab-height 2.0) 4.5)
+                           my/tab--c-running bg))
                  (my/tab--svg-text label-x label family px fg
                                    (and active project "600")))))
          ;; close slot: × on the active tab, ● when there are unsaved files
@@ -253,7 +257,7 @@
 
 (setq tab-bar-tab-name-format-function #'my/tab-bar-tab-name-format)
 
-;; Redraw tabs when a buffer's modified state changes, so ● updates.
+;; redraw tabs when a buffer's modified state changes, so ● updates
 (defvar-local my/tab--last-modified nil)
 (defun my/tab--maybe-refresh ()
   (let ((m (buffer-modified-p)))
@@ -263,8 +267,7 @@
 (add-hook 'post-command-hook #'my/tab--maybe-refresh)
 (add-hook 'after-save-hook (lambda () (force-mode-line-update t)))
 
-;; ---------------------------------------------------------------------
-;; Theme integration
+;;; theme integration
 ;; ---------------------------------------------------------------------
 
 (defun my/tab-apply-theme (&rest _)
@@ -282,6 +285,7 @@
           my/tab--c-fg     fg
           my/tab--c-dim    (my/tab--mix fg bg 0.62)
           my/tab--c-accent (my/tab--hex accent)
+          my/tab--c-running (my/tab--face-color 'success :foreground "#5fb85f")
           my/tab--c-border (my/tab--mix (if dark "#000000" "#000000") strip 0.25))
     (dolist (face '(tab-bar tab-bar-tab tab-bar-tab-inactive))
       (set-face-attribute face nil
@@ -296,7 +300,7 @@
 (advice-add 'enable-theme :after #'my/tab-apply-theme)
 (advice-add 'disable-theme :after #'my/tab-apply-theme)
 
-;; Emacs daemon: the first GUI frame is when real colors/fonts are known.
+;; Emacs daemon: the first GUI frame is when real colors/fonts are known
 (defun my/tab-on-new-frame (frame)
   (with-selected-frame frame (my/tab-apply-theme)))
 (add-hook 'after-make-frame-functions #'my/tab-on-new-frame)
@@ -309,8 +313,7 @@
            (my/tab--font-family) (my/tab--font-px)
            my/tab--c-active my/tab--c-strip my/tab--c-accent))
 
-;; ---------------------------------------------------------------------
-;; Keybindings
+;;; keybindings
 ;; ---------------------------------------------------------------------
 
 (cl-loop for i from 1 to 10 do

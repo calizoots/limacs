@@ -26,11 +26,13 @@
 (require 'buffers)
 (require 'themes)
 (require 'tabs)
+(require 'modeline)
 (require 'projects)
 
 ;; runtime
 (require 'my-task)
 (require 'my-task-ui)
+(require 'my-run)
 
 ;; treesitter
 
@@ -56,4 +58,4 @@
 
 (require 'line-numbers)
 
-;; init.el ends here
+;;; init.el ends here

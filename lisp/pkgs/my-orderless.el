@@ -9,4 +9,4 @@
 
 (provide 'my-orderless)
 
-;; my-orderless.el ends here
+;;; my-orderless.el ends here

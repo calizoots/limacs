@@ -1,4 +1,4 @@
-;;; editor/languages.el
+;;; pkgs/languages.el
 
 (use-package emmet-mode
   :hook (web-mode . emmet-mode)
@@ -92,4 +92,4 @@
 
 (provide 'languages)
 
-;; languages.el ends here
+;;; languages.el ends here

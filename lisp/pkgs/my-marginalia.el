@@ -6,4 +6,4 @@
 
 (provide 'my-marginalia)
 
-;; my-marginalia.el ends here
+;;; my-marginalia.el ends here

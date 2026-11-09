@@ -23,17 +23,17 @@
              (name (my/project-neotree-name project))
              (buffer (get-buffer name)))
 
-        ;; Tell NeoTree which buffer represents this project.
+        ;; tell NeoTree which buffer represents this project
         (setq neo-buffer-name name)
 
-        ;; Open or reuse the project's NeoTree.
+        ;; open or reuse the project's NeoTree
         (if buffer
             (progn
               (setq neo-global--buffer buffer)
               (neo-global--open))
           (neo-global--open-dir root)
 
-          ;; NeoTree creates the buffer during the operation.
+          ;; NeoTree creates the buffer during the operation
           (when-let ((buffer (get-buffer name)))
             (my/project-set-neotree project buffer)))))))
 

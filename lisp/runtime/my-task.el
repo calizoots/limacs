@@ -1,6 +1,16 @@
-;;; my-task.el
+;;; runtime/my-task.el  -*- lexical-binding: t; -*-
+
+;; background processes with a combined log
+
+;; A task is one execution of a command.  Its stdout and stderr are written
+;; to a single log buffer (stderr in red); stderr also goes to its own
+;; buffer.  Tasks run in their own process group, so stopping one also
+;; stops whatever it spawned (npm -> node, cargo -> binary, ...).
 
 (require 'cl-lib)
+(require 'seq)
+(require 'compile)
+(require 'ansi-color)
 
 ;;; State
 
@@ -10,14 +20,17 @@
   command
   directory
   process
-  buffer
-  error-buffer
-  status
+  buffer          ; combined stdout + stderr log
+  error-buffer    ; stderr only
+  status          ; pending running succeeded failed cancelled
   exit-code
   started-at
   finished-at
   on-success
-  on-failure)
+  on-failure
+  project         ; project root this task belongs to, or nil
+  kind            ; `task' (runs and exits) or `server' (long-running)
+  url)            ; first local URL seen in the output
 
 (defvar my/task--next-id 0
   "Next task execution ID.")
@@ -25,11 +38,81 @@
 (defvar my/task--registry (make-hash-table :test #'eql)
   "Registry of task executions, indexed by ID.")
 
+(defvar my/task-changed-hook nil
+  "Hook run with one argument, the task, whenever a task's status changes.")
+
+(defvar my/task-stop-timeout 3
+  "Seconds to wait after SIGTERM before killing a task with SIGKILL.")
+
+(defvar my/task-environment
+  '("FORCE_COLOR=1" "CLICOLOR_FORCE=1" "CARGO_TERM_COLOR=always" "TERM=xterm-256color")
+  "Extra environment for tasks, so tools keep their colors.")
+
+(defface my/task-stderr '((t :inherit error :weight normal))
+  "Face for stderr lines in a task log.")
+
+(defface my/task-meta '((t :inherit shadow :slant italic))
+  "Face for the header and footer lines of a task log.")
+
 ;;; Internal helpers
+
+(defun my/task--changed (task)
+  (run-hook-with-args 'my/task-changed-hook task))
 
 (defun my/task--set-status (task status)
   "Set TASK's STATUS."
-  (setf (my/task-status task) status))
+  (setf (my/task-status task) status)
+  (my/task--changed task))
+
+(defun my/task-duration (task)
+  "Seconds TASK has been running, or ran for."
+  (when (my/task-started-at task)
+    (float-time (time-subtract (or (my/task-finished-at task) (current-time))
+                               (my/task-started-at task)))))
+
+(defun my/task-format-duration (seconds)
+  (cond ((null seconds) "")
+        ((< seconds 10) (format "%.1fs" seconds))
+        ((< seconds 60) (format "%ds" seconds))
+        ((< seconds 3600) (format "%dm %02ds" (/ seconds 60) (mod (round seconds) 60)))
+        (t (format "%dh %02dm" (/ seconds 3600) (/ (mod (round seconds) 3600) 60)))))
+
+(defvar-local my/task--stderr-ansi nil
+  "ANSI color state for the stderr stream of this log buffer.")
+
+(defconst my/task--url-regexp
+  "https?://\\(?:localhost\\|127\\.0\\.0\\.1\\|0\\.0\\.0\\.0\\|\\[::1?\\]\\|[a-z0-9.-]+\\.local\\)\\(?::[0-9]+\\)?[^][ \t\n\"'<>]*")
+
+(defun my/task--insert (task string &optional face)
+  "Append STRING to TASK's log, optionally with FACE.
+Windows (and the buffer's own point) that were at the end keep following."
+  (let ((buf (my/task-buffer task)))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (let* ((inhibit-read-only t)
+               (string (replace-regexp-in-string "\r\n" "\n" string))
+               (string (replace-regexp-in-string "\r" "\n" string))
+               (text (if (eq face 'my/task-stderr)
+                         (let ((ansi-color-context my/task--stderr-ansi))
+                           (prog1 (ansi-color-apply string)
+                             (setq my/task--stderr-ansi ansi-color-context)))
+                       (ansi-color-apply string)))
+               (at-end (= (point) (point-max)))
+               (following (seq-filter (lambda (w) (= (window-point w) (point-max)))
+                                      (get-buffer-window-list buf nil t))))
+          (when face
+            (add-face-text-property 0 (length text) face t text))
+          (save-excursion
+            (goto-char (point-max))
+            (insert text))
+          (when at-end (goto-char (point-max)))
+          (dolist (w following) (set-window-point w (point-max)))
+          (unless (or face (my/task-url task))
+            (let ((plain (substring-no-properties text)))
+              (when (string-match my/task--url-regexp plain)
+                (setf (my/task-url task)
+                      (replace-regexp-in-string "[.,;:)]+\\'" "" (match-string 0 plain)))
+                (my/task--changed task)))))))))
 
 (defun my/task--finish (task status exit-code)
   "Finalize TASK with STATUS and EXIT-CODE."
@@ -38,6 +121,17 @@
     (setf (my/task-status task) status
           (my/task-exit-code task) exit-code
           (my/task-finished-at task) (current-time))
+
+    (my/task--insert
+     task
+     (format "\n%s · %s\n"
+             (pcase status
+               ('succeeded "✓ finished")
+               ('cancelled "■ stopped")
+               (_ (if exit-code (format "✗ exited with code %d" exit-code) "✗ failed")))
+             (my/task-format-duration (my/task-duration task)))
+     'my/task-meta)
+    (my/task--changed task)
 
     (let ((callback
            (if (eq status 'succeeded)
@@ -52,6 +146,11 @@
 (defun my/task--sentinel (process _event)
   "Handle PROCESS completion."
   (when (memq (process-status process) '(exit signal))
+    ;; drain stderr before writing the footer
+    (when-let ((err-proc (process-get process 'my/task-stderr)))
+      (while (and (process-live-p err-proc)
+                  (accept-process-output err-proc 0.05)))
+      (delete-process err-proc))
     (when-let ((task (process-get process 'my/task)))
       (let* ((code (process-exit-status process))
              (status (if (and (eq (process-status process) 'exit)
@@ -63,11 +162,13 @@
 ;;; Public API
 
 (cl-defun my/task-start (&key name command directory
-                              on-success on-failure)
+                              on-success on-failure
+                              project kind)
   "Start an asynchronous task.
 
 COMMAND must be a list of strings.
 DIRECTORY defaults to `default-directory'.
+PROJECT is the project root the task belongs to; KIND is `task' or `server'.
 
 Return the task object."
   (unless (and (listp command)
@@ -81,70 +182,123 @@ Return the task object."
                      (or directory default-directory)))
          (buffer (generate-new-buffer
                   (format "*task:%s:%d*" name id)))
-	 (error-buffer (generate-new-buffer
-	   (format "*task:%s:%d:stderr*" name id)))
+         (error-buffer (generate-new-buffer
+                        (format " *task:%s:%d:stderr*" name id)))
          (task (my/task--create
                 :id id
                 :name name
                 :command command
                 :directory directory
                 :buffer buffer
-		:error-buffer error-buffer
+                :error-buffer error-buffer
                 :status 'pending
                 :started-at (current-time)
                 :on-success on-success
-                :on-failure on-failure)))
+                :on-failure on-failure
+                :project project
+                :kind (or kind 'task))))
 
     (puthash id task my/task--registry)
 
-    (condition-case err
-        (let ((default-directory
-               (file-name-as-directory directory)))
-          (let ((process
-                 (make-process
-                  :name (format "task-%d" id)
-                  :buffer buffer
-		  :stderr error-buffer
-                  :command command
-                  :noquery t
-                  :connection-type 'pipe
-                  :sentinel #'my/task--sentinel)))
+    (with-current-buffer buffer
+      (when (fboundp 'my/task-log-mode) (my/task-log-mode))
+      (setq-local my/task--id id)
+      (let ((inhibit-read-only t))
+        (insert (propertize (format "$ %s\n  in %s\n\n"
+                                    (mapconcat #'shell-quote-argument command " ")
+                                    (abbreviate-file-name directory))
+                            'face 'my/task-meta))))
 
-            (setf (my/task-process task) process)
-            (process-put process 'my/task task)
-            (my/task--set-status task 'running)))
+    (condition-case err
+        (let* ((default-directory (file-name-as-directory directory))
+               (process-environment (append my/task-environment process-environment))
+               (err-proc
+                (make-pipe-process
+                 :name (format "task-%d-stderr" id)
+                 :noquery t
+                 :filter (lambda (_proc string)
+                           (when (buffer-live-p error-buffer)
+                             (with-current-buffer error-buffer
+                               (save-excursion
+                                 (goto-char (point-max))
+                                 (insert string))))
+                           (my/task--insert task string 'my/task-stderr))
+                 :sentinel #'ignore))
+               (process
+                (make-process
+                 :name (format "task-%d" id)
+                 :buffer buffer
+                 :stderr err-proc
+                 :command command
+                 :noquery t
+                 :connection-type 'pipe
+                 :filter (lambda (_proc string) (my/task--insert task string))
+                 :sentinel #'my/task--sentinel)))
+          (setf (my/task-process task) process)
+          (process-put process 'my/task task)
+          (process-put process 'my/task-stderr err-proc)
+          (my/task--set-status task 'running))
 
       (error
-       (my/task--finish task 'failed nil)
-       (with-current-buffer buffer
-         (goto-char (point-max))
-         (insert (format "\nFailed to start: %s\n"
-                         (error-message-string err))))))
+       (my/task--insert task (format "Failed to start: %s\n" (error-message-string err))
+                        'my/task-stderr)
+       (my/task--finish task 'failed nil)))
 
     task))
 
+(defun my/task-live-p (task)
+  (eq (my/task-status task) 'running))
+
 (defun my/task-cancel (task)
-  "Cancel TASK if it is running."
+  "Stop TASK and everything it started."
   (interactive
    (list (my/task-read "Cancel task: ")))
 
   (unless (eq (my/task-status task) 'running)
     (user-error "Task is not running"))
 
-  ;; Mark before terminating, so the sentinel cannot
-  ;; accidentally classify cancellation as failure.
+  ;; mark before terminating, so the sentinel cannot
+  ;; accidentally classify cancellation as failure
   (my/task--finish task 'cancelled nil)
 
-  (when-let ((process (my/task-process task)))
+  (when-let* ((process (my/task-process task))
+              (pid (process-id process)))
     (when (process-live-p process)
-      (delete-process process))))
+      ;; the task is a process-group leader: signal the whole group
+      (ignore-errors (signal-process (- pid) 'SIGTERM))
+      (run-at-time my/task-stop-timeout nil
+                   (lambda ()
+                     (when (process-live-p process)
+                       (ignore-errors (signal-process (- pid) 'SIGKILL))
+                       (delete-process process)))))))
+
+(defun my/task-restart (task)
+  "Stop TASK if running and start a fresh copy.  Return the new task."
+  (when (my/task-live-p task)
+    (my/task-cancel task))
+  (my/task-start :name (my/task-name task)
+                 :command (my/task-command task)
+                 :directory (my/task-directory task)
+                 :project (my/task-project task)
+                 :kind (my/task-kind task)
+                 :on-success (my/task-on-success task)
+                 :on-failure (my/task-on-failure task)))
+
+(defun my/task-delete (task)
+  "Forget a finished TASK and kill its buffers."
+  (when (my/task-live-p task)
+    (user-error "Stop the task first"))
+  (remhash (my/task-id task) my/task--registry)
+  (dolist (b (list (my/task-buffer task) (my/task-error-buffer task)))
+    (when (buffer-live-p b) (kill-buffer b)))
+  (my/task--changed task))
 
 (defun my/task-get (id)
   "Return the task with ID."
   (gethash id my/task--registry))
 
 (defun my/task-open-output (task)
-  "Display standard output for TASK."
+  "Display the log for TASK."
   (interactive
    (list (my/task-read "Task output: ")))
   (pop-to-buffer (my/task-buffer task)))
@@ -192,10 +346,22 @@ Return the task object."
       choices))))
 
 (defun my/task-open (task)
-  "Display TASK's output buffer."
+  "Display TASK's log buffer."
   (interactive
    (list (my/task-read "Open task: ")))
   (pop-to-buffer (my/task-buffer task)))
+
+;;; Log buffers
+
+(defvar-local my/task--id nil
+  "ID of the task whose log is in this buffer.")
+
+(define-derived-mode my/task-log-mode special-mode "Task Log"
+  "Read-only log of a task's stdout and stderr."
+  (setq-local truncate-lines nil)
+  (setq-local buffer-read-only t)
+  ;; file:line references in compiler output become clickable
+  (compilation-minor-mode 1))
 
 (provide 'my-task)
 

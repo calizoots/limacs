@@ -11,4 +11,4 @@
 
 (provide 'my-diff-hl)
 
-;; my-diff-hl.el ends here
+;;; my-diff-hl.el ends here

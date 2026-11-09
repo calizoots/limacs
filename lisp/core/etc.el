@@ -15,4 +15,4 @@
 
 (provide 'etc)
 
-;; etc.el ends here
+;;; etc.el ends here

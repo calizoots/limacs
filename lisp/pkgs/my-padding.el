@@ -1,4 +1,4 @@
-;; pkgs/my-padding.el
+;;; pkgs/my-padding.el
 
 (use-package spacious-padding
   :ensure t
@@ -19,4 +19,4 @@
 
 (provide 'my-padding)
 
-;; my-padding.el ends here
+;;; my-padding.el ends here

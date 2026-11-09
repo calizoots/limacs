@@ -1,4 +1,6 @@
-;;; editor/projects.el --- tabs as projects  -*- lexical-binding: t; -*-
+;;; editor/projects.el  -*- lexical-binding: t; -*-
+
+;; tabs as projects
 
 ;; A project is a root directory.  Tabs are linked to a project; every tab
 ;; of a project shares that project's NeoTree, and file search
@@ -7,7 +9,8 @@
 ;; Known projects persist across restarts through project.el's list
 ;; (~/.emacs.d/projects).
 ;;
-;; Keys (normal state):
+;; Keys (normal state)
+;; ---------------------------------------------------------------------
 ;;   SPC p o  open/switch to a project (known list, or browse for a folder)
 ;;   SPC p t  new tab in the current project
 ;;   SPC p a  attach the current tab to a project
@@ -28,8 +31,7 @@
 (defvar my/projects nil
   "Projects opened in this session.")
 
-;; ---------------------------------------------------------------------
-;; Records
+;;; records
 ;; ---------------------------------------------------------------------
 
 (defun my/project--normalize (dir)
@@ -55,8 +57,7 @@
           (push project my/projects)
           project))))
 
-;; ---------------------------------------------------------------------
-;; Persistence (shared with project.el)
+;;; persistence (shared with project.el)
 ;; ---------------------------------------------------------------------
 
 (defun my/project--remember (root)
@@ -79,8 +80,7 @@
                        (append (mapcar (lambda (p) (plist-get p :root)) my/projects)
                                (ignore-errors (project-known-project-roots)))))))
 
-;; ---------------------------------------------------------------------
-;; Tabs
+;;; tabs
 ;; ---------------------------------------------------------------------
 
 (defun my/project-current-tab ()
@@ -120,8 +120,7 @@
        (member (buffer-name (window-buffer))
                '("*scratch*" "*GNU Emacs*" "*Messages*" "*dashboard*"))))
 
-;; ---------------------------------------------------------------------
-;; Buffers
+;;; buffers
 ;; ---------------------------------------------------------------------
 
 (defun my/project-buffer-p (buffer project)
@@ -131,6 +130,7 @@
                   (buffer-local-value 'default-directory buffer))))
     (and file
          (not (string-prefix-p " " (buffer-name buffer)))
+         (not (eq (buffer-local-value 'major-mode buffer) 'neotree-mode))
          (string-prefix-p root (expand-file-name file)))))
 
 (defun my/project-buffers (project)
@@ -152,8 +152,7 @@
       (save-selected-window
         (ignore-errors (my/neotree-open))))))
 
-;; ---------------------------------------------------------------------
-;; Picking a project
+;;; picking a project
 ;; ---------------------------------------------------------------------
 
 (defconst my/project--browse "  Browse for a folder…")
@@ -175,8 +174,7 @@
     (or (cdr (assoc choice table))
         (read-directory-name "Project folder: " default-directory nil t))))
 
-;; ---------------------------------------------------------------------
-;; Commands
+;;; commands
 ;; ---------------------------------------------------------------------
 
 (defun my/project-switch (directory)
@@ -292,8 +290,7 @@
     (setf (alist-get 'my-project-id (cdr tab) nil t) nil)
     (tab-bar-tabs-set (tab-bar-tabs))))
 
-;; ---------------------------------------------------------------------
-;; NeoTree bookkeeping (used by pkgs/my-neotree.el)
+;;; NeoTree bookkeeping (used by pkgs/my-neotree.el)
 ;; ---------------------------------------------------------------------
 
 (defun my/project-neotree-buffer (project)
@@ -311,8 +308,7 @@
   (setf (plist-get project :neotree) (buffer-name buffer))
   buffer)
 
-;; ---------------------------------------------------------------------
-;; Keys
+;;; keys
 ;; ---------------------------------------------------------------------
 
 (defun my/project--vertico (fn)

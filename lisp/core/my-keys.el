@@ -125,7 +125,7 @@
   "Toggle the most recently used compilation buffer."
   (interactive)
   (my/compilation-cleanup)
-  (if-let ((buffer (car my/compilation-buoers)))
+  (if-let ((buffer (car my/compilation-buffers)))
       (if-let ((window (get-buffer-window buffer)))
           (delete-window window)
         (pop-to-buffer buffer))
@@ -178,4 +178,4 @@
 
 (provide 'my-keys)
 
-;; my-keys.el ends here
+;;; my-keys.el ends here

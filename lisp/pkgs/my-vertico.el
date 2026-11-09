@@ -22,7 +22,7 @@
   (setq vertico-posframe-poshandler
         #'posframe-poshandler-frame-center)
 
-  ;; Commands that should use posframe when Vertico is active.
+  ;; commands that should use posframe when Vertico is active
   (add-to-list 'vertico-multiform-commands
                '(consult-ripgrep posframe))
   (add-to-list 'vertico-multiform-commands

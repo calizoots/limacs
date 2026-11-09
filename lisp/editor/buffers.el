@@ -1,7 +1,7 @@
 ;;; editor/buffers.el
 
 (defun kill-buffer-and-window ()
-  "kill the current buffer, then close its window."
+  "Kill the current buffer, then close its window."
   (interactive)
   (kill-buffer (current-buffer))
   (delete-window))
@@ -9,7 +9,7 @@
 (global-set-key (kbd "C-c C-k") #'kill-buffer-and-window)
 
 (defun my/find-buffer ()
-  "select a buffer to open in current window"
+  "Select a buffer to open in current window."
   (interactive)
   (let* ((all-buffers (mapcar #'buffer-name (buffer-list)))
          (choice (completing-read "find buffer: " all-buffers)))
@@ -17,7 +17,7 @@
       (switch-to-buffer choice))))
 
 (defun my/find-buffer-floating ()
-  "select a buffer using a beautifully custom-rendered floating childframe"
+  "Select a buffer using a beautifully custom-rendered floating childframe."
   (interactive)
   (let* ((all-buffers (mapcar #'buffer-name (buffer-list)))
          (choice (completing-read "Find Buffer: " all-buffers)))
@@ -27,4 +27,4 @@
 
 (provide 'buffers)
 
-;; buffers.el ends here
+;;; buffers.el ends here

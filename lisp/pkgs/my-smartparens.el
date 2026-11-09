@@ -8,4 +8,4 @@
 
 (provide 'my-smartparens)
 
-;; my-smartparens.el ends here
+;;; my-smartparens.el ends here

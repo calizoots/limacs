@@ -24,4 +24,4 @@
 
 (provide 'my-ghostel)
 
-;; my-ghostel.el ends here
+;;; my-ghostel.el ends here

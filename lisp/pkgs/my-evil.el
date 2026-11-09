@@ -14,4 +14,4 @@
 
 (provide 'my-evil)
 
-;; my-evil.el ends here
+;;; my-evil.el ends here

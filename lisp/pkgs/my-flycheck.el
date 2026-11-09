@@ -17,4 +17,4 @@
 
 (provide 'my-flycheck)
 
-;; my-flycheck.el ends here
+;;; my-flycheck.el ends here

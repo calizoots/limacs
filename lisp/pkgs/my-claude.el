@@ -16,4 +16,4 @@
 
 (provide 'my-claude)
 
-;; my-claude.el ends here
+;;; my-claude.el ends here

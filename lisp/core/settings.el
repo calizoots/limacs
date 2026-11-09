@@ -1,4 +1,4 @@
-;;; core/settings.el 
+;;; core/settings.el
 
 (setq inhibit-splash-screen t)
 (setq ring-bell-function #'ignore)
@@ -6,7 +6,7 @@
 (setq-default truncate-lines t)
 (setq tab-width 4)
 
-;; Allow horizontal scrolling with trackpad/scroll wheel
+;; allow horizontal scrolling with trackpad/scroll wheel
 (setq mouse-wheel-tilt-scroll t
       mouse-wheel-flip-direction t)
 

@@ -5,4 +5,4 @@
 
 (provide 'my-all-the-icons)
 
-;; my-all-the-icons.el ends here
+;;; my-all-the-icons.el ends here
