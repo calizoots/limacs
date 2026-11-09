@@ -29,7 +29,9 @@
 (defvar my/tab-accent nil
   "Accent color for the active tab, or nil to take it from the theme.")
 
-(setq tab-bar-format '(tab-bar-format-tabs)
+(setq tab-bar-format '(my/tab-bar-format-unpinned
+                       tab-bar-format-align-right
+                       my/tab-bar-format-pinned)
       tab-bar-separator ""
       tab-bar-auto-width nil
       tab-bar-select-tab-modifiers '(super)
@@ -322,6 +324,223 @@
            (my/tab--font-family) (my/tab--font-px)
            my/tab--c-active my/tab--c-strip my/tab--c-accent))
 
+;;; pinned tabs
+;; ---------------------------------------------------------------------
+
+;; A pinned tab sits at the far right of the bar, out of the way (music,
+;; mail, services...).  The flag lives in the tab itself as `my/pinned'
+;; (the time it was pinned); tab-bar copies unknown parameters along, so
+;; it survives switching.  Pinned tabs are kept at the end of the tab
+;; list, so s-1.. still counts left to right across everything, while
+;; s-M-1.. counts pinned tabs from the right edge: the first one you
+;; pinned is always s-M-1.
+
+(defun my/tab-pinned-p (tab)
+  (alist-get 'my/pinned (cdr tab)))
+
+(defun my/tab--pinned-tabs ()
+  "Pinned tabs, right edge first."
+  (reverse (seq-filter #'my/tab-pinned-p (funcall tab-bar-tabs-function))))
+
+(defun my/tab-keep-pinned-right (&rest _)
+  "Reorder this frame's tabs: unpinned in order, then pinned.
+Pinned tabs are ordered newest-pinned leftmost, so older pins keep
+their place against the right edge."
+  (let* ((tabs (funcall tab-bar-tabs-function))
+         (pinned (sort (seq-filter #'my/tab-pinned-p tabs)
+                       (lambda (a b) (> (my/tab-pinned-p a) (my/tab-pinned-p b)))))
+         (new (append (seq-remove #'my/tab-pinned-p tabs) pinned)))
+    (unless (equal (mapcar #'cdr new) (mapcar #'cdr tabs))
+      (tab-bar-tabs-set new)
+      (force-mode-line-update))))
+
+(advice-add 'tab-bar-new-tab-to :after #'my/tab-keep-pinned-right)
+(advice-add 'tab-bar-move-tab-to :after #'my/tab-keep-pinned-right)
+
+(defun my/tab-pin-toggle (&optional tab-number)
+  "Pin the current tab (or tab TAB-NUMBER) to the right of the bar, or unpin it."
+  (interactive)
+  (let ((tab (if tab-number
+                 (nth (1- tab-number) (funcall tab-bar-tabs-function))
+               (tab-bar--current-tab-find))))
+    (if (my/tab-pinned-p tab)
+        (setf (cdr tab) (assq-delete-all 'my/pinned (cdr tab)))
+      (setf (alist-get 'my/pinned (cdr tab)) (float-time)))
+    (my/tab-keep-pinned-right)
+    (force-mode-line-update)
+    (message "%s %s" (if (my/tab-pinned-p tab) "Pinned" "Unpinned")
+             (alist-get 'name (cdr tab)))))
+
+(defun my/tab-select-pinned (n)
+  "Switch to the Nth pinned tab, counting from the right edge."
+  (let ((tab (nth (1- n) (my/tab--pinned-tabs))))
+    (if tab
+        (tab-bar-select-tab (1+ (seq-position (funcall tab-bar-tabs-function) tab #'eq)))
+      (message "No pinned tab %d" n))))
+
+(defun my/tab--format-some (pinned)
+  "Format the tabs whose pinned state is PINNED, keeping real tab numbers."
+  (let ((i 0))
+    (mapcan (lambda (tab)
+              (setq i (1+ i))
+              (when (eq (and (my/tab-pinned-p tab) t) pinned)
+                (tab-bar--format-tab tab i)))
+            (funcall tab-bar-tabs-function))))
+
+(defun my/tab-bar-format-unpinned () (my/tab--format-some nil))
+(defun my/tab-bar-format-pinned () (my/tab--format-some t))
+
+;;; right-click menu
+;; ---------------------------------------------------------------------
+
+;; Right click a tab for what you can do with it (pin, project, close...),
+;; or the empty part of the bar to open things.  Actions on another tab
+;; switch to it first, so they behave exactly like their keys there.
+
+(defun my/menu (title items)
+  "A popup menu keymap called TITLE from ITEMS, in order.
+Each item is \"--\" (a separator), (LABEL :sub ITEMS) for a submenu,
+\(LABEL COMMAND . PROPS) where PROPS go to `menu-item' (:enable FORM,
+:button ...), or nil, which is skipped."
+  (let ((map (make-sparse-keymap title))
+        (n 0))
+    (dolist (item items)
+      (let ((key (vector (intern (format "item-%d" (cl-incf n))))))
+        (pcase item
+          ('nil nil)
+          ((pred stringp) (define-key-after map key (list 'menu-item item)))
+          (`(,label :sub ,sub)
+           (define-key-after map key (list 'menu-item label (my/menu label sub))))
+          (`(,label ,command . ,props)
+           (define-key-after map key `(menu-item ,label ,command ,@props))))))
+    map))
+
+(defmacro my/tab--do (&rest body)
+  `(lambda () (interactive) ,@body))
+
+(defun my/tab--on (n command)
+  "A menu action: go to tab N, then run COMMAND there."
+  (my/tab--do (tab-bar-select-tab n)
+              (call-interactively command)))
+
+(defun my/tab--picker (command)
+  "COMMAND, with its prompt in the vertico popup when that's set up."
+  (if (fboundp 'my/project--vertico) (my/project--vertico command) command))
+
+(defun my/tab-close-others (n)
+  "Close every tab but N, keeping pinned ones."
+  ;; stand on N so closing the others never moves you elsewhere
+  (tab-bar-select-tab n)
+  (let ((tabs (funcall tab-bar-tabs-function)))
+    (dolist (i (number-sequence (length tabs) 1 -1))
+      (unless (or (= i n) (my/tab-pinned-p (nth (1- i) tabs)))
+        (tab-bar-close-tab i)))))
+
+(defun my/tab-close-right (n)
+  "Close the unpinned tabs right of tab N."
+  ;; stand on N so closing the others never moves you elsewhere
+  (tab-bar-select-tab n)
+  (let ((tabs (funcall tab-bar-tabs-function)))
+    (dolist (i (number-sequence (length tabs) (1+ n) -1))
+      (unless (my/tab-pinned-p (nth (1- i) tabs))
+        (tab-bar-close-tab i)))))
+
+(defun my/tab--project-items (n project)
+  "Project submenu items for tab N, whose project is PROJECT (or nil)."
+  (let* ((root (plist-get project :root))
+         (others (seq-remove (lambda (r) (equal r root))
+                             (and (fboundp 'my/project-known-roots)
+                                  (my/project-known-roots)))))
+    `(,@(when project
+          `((,(format "New tab in %s" (plist-get project :name)) ,(my/tab--on n #'my/project-new-tab))
+            ("Find file…" ,(my/tab--on n #'my/project-find-file))
+            ("Search in project…" ,(my/tab--on n #'my/project-grep))
+            ("Terminal" ,(my/tab--on n #'my/project-terminal))
+            ("Files (dired)" ,(my/tab--on n #'my/project-dired))
+            "--"
+            ("Run panel" ,(my/tab--do (tab-bar-select-tab n) (my/run-panel-show root)))
+            ("Start servers" ,(my/tab--do (tab-bar-select-tab n) (my/run-start-servers root)))
+            ("Stop everything…" ,(my/tab--do (tab-bar-select-tab n) (my/run-stop-all root)))
+            ("Services" ,(my/tab--do (my/services-show-project root)))
+            "--"))
+      ("Open project…" ,(my/tab--picker #'my/project-open))
+      ,(when others
+         `("Switch to"
+           :sub ,(mapcar (lambda (r)
+                           (list (file-name-nondirectory (directory-file-name r))
+                                 (my/tab--do (my/project-switch r))))
+                         (seq-take others 12))))
+      (,(if project "Attach this tab to another project…" "Attach this tab to a project…")
+       ,(my/tab--on n (my/tab--picker #'my/project-attach)))
+      ,(when project
+         `(,(format "Close project %s…" (plist-get project :name))
+           ,(my/tab--on n #'my/project-close))))))
+
+(defun my/tab--apps-items ()
+  `(("Music" my/music :enable (fboundp 'my/music))
+    ("Services" my/services-open-tab :enable (fboundp 'my/services-open-tab))
+    ("Mail" my/mail :enable (fboundp 'my/mail))))
+
+(defun my/tab-context-menu (event)
+  "Right-click menu for the clicked tab, or for the empty tab bar."
+  (interactive "e")
+  (let* ((item (tab-bar--event-to-item (event-start event)))
+         ;; the selected tab comes back as `current-tab', with no number
+         (n (if (eq (car-safe item) 'current-tab)
+                (1+ (tab-bar--current-tab-index))
+              (and item (tab-bar--key-to-number (nth 0 item)))))
+         (tabs (funcall tab-bar-tabs-function))
+         (count (length tabs)))
+    (popup-menu
+     (if (not (integerp n))
+         (my/menu "Tabs"
+                  `(("New tab" tab-bar-new-tab)
+                    ("Open project…" ,(my/tab--picker #'my/project-open))
+                    ,@(when (fboundp 'my/project-known-roots)
+                        `(("Recent projects"
+                           :sub ,(mapcar (lambda (r)
+                                           (list (file-name-nondirectory (directory-file-name r))
+                                                 (my/tab--do (my/project-switch r))))
+                                         (seq-take (my/project-known-roots) 12)))))
+                    "--"
+                    ,@(my/tab--apps-items)
+                    ,(when tab-bar-closed-tabs '("--"))
+                    ,(when tab-bar-closed-tabs '("Reopen closed tab" tab-bar-undo-close-tab))))
+       (let* ((tab (nth (1- n) tabs))
+              (pinned (my/tab-pinned-p tab))
+              (project (my/tab--project tab)))
+         (my/menu
+          (my/tab--label tab project)
+          `((,(if pinned "Unpin" "Pin to the right") ,(my/tab--do (my/tab-pin-toggle n)))
+            ,(unless project
+               `("Rename…" ,(my/tab--do (tab-bar-rename-tab
+                                         (read-string "Tab name: " (alist-get 'name (cdr tab)))
+                                         n))))
+            "--"
+            ("Project" :sub ,(my/tab--project-items n project))
+            "--"
+            ("New tab" tab-bar-new-tab)
+            ("Duplicate" ,(my/tab--do (tab-bar-duplicate-tab nil n)))
+            ("Move to a new window" ,(my/tab--do (tab-bar-detach-tab n)))
+            ,(unless pinned
+               `("Move left" ,(my/tab--do (tab-bar-select-tab n) (tab-bar-move-tab -1))
+                 :enable ,(> n 1)))
+            ,(unless pinned
+               `("Move right" ,(my/tab--do (tab-bar-select-tab n) (tab-bar-move-tab 1))
+                 :enable ,(and (< n count) (not (my/tab-pinned-p (nth n tabs))))))
+            "--"
+            ("Close" ,(my/tab--do (tab-bar-close-tab n)) :enable ,(> count 1))
+            ("Close other tabs (keeps pinned)" ,(my/tab--do (my/tab-close-others n))
+             :enable ,(> count 1))
+            ("Close tabs to the right" ,(my/tab--do (my/tab-close-right n))
+             :enable ,(< n count))
+            ,(when tab-bar-closed-tabs '("Reopen closed tab" tab-bar-undo-close-tab))
+            "--"
+            ,@(my/tab--apps-items)))))
+     event)))
+
+(keymap-set tab-bar-map "<down-mouse-3>" #'my/tab-context-menu)
+
 ;;; keybindings
 ;; ---------------------------------------------------------------------
 
@@ -337,6 +556,21 @@
              (define-key ghostel-semi-char-mode-map
                (kbd (concat "s-" key))
                `(lambda () (interactive) (tab-bar-select-tab ,i))))))
+
+(cl-loop for i from 1 to 9 do
+         (let ((n i))
+           (global-set-key (kbd (format "s-M-%d" n))
+                           (lambda () (interactive) (my/tab-select-pinned n)))))
+
+(with-eval-after-load 'ghostel
+  (cl-loop for i from 1 to 9 do
+           (let ((n i))
+             (define-key ghostel-semi-char-mode-map (kbd (format "s-M-%d" n))
+               (lambda () (interactive) (my/tab-select-pinned n))))))
+
+(global-set-key (kbd "s-M-p") #'my/tab-pin-toggle)
+(with-eval-after-load 'evil
+  (evil-define-key 'normal 'global (kbd "<leader>tp") #'my/tab-pin-toggle))
 
 (global-set-key (kbd "s-t") 'tab-new)
 (global-set-key (kbd "s-w") 'tab-close)
