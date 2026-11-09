@@ -850,7 +850,7 @@ file is named and tagged with those instead of the uploader's."
          (playlists (my/music--playlists)))
     (erase-buffer)
     ;; now playing
-    (insert "\n  " (my/music-page--card track) "\n\n")
+    (insert "\n  " (propertize (my/music-page--card track) 'my/music-item '(now)) "\n\n")
     (insert (if track (my/music-page--progress) "\n"))
     (insert (my/music-page--status))
     ;; queue
@@ -878,7 +878,7 @@ file is named and tagged with those instead of the uploader's."
       (dolist (file playlists)
         (insert (propertize (concat "    ≡ "
                                     (string-pad (file-name-base file) 30)
-                                    (propertize (format "%d tracks" (my/music--playlist-size file))
+                                    (propertize (my/music--plural (my/music--playlist-size file) "track")
                                                 'face 'shadow)
                                     "\n")
                             'my/music-item (list 'playlist file)))))
@@ -1034,7 +1034,7 @@ file is named and tagged with those instead of the uploader's."
                    "/ find&play  a add  u link  o online  D download link  "
                    "d remove  J K move  c clear  w save playlist  "
                    "s shuffle queue  S shuffle mode  r repeat  l library  A artist  "
-                   "e edit playlist  b browse  R rescan  L lyrics  E edit lyrics  T tags  q close")))
+                   "e edit playlist  n new playlist  right-click a row for its menu  b browse  R rescan  L lyrics  E edit lyrics  T tags  q close")))
 
 ;;; lyrics
 ;; ---------------------------------------------------------------------
@@ -2326,19 +2326,28 @@ note: tracks are lists themselves, so playlist rows are tagged with :row."
     (when (string-empty-p name) (user-error "A playlist needs a name"))
     (expand-file-name (concat name ".m3u") (my/music--playlists-dir))))
 
-(defun my/music-lib-add-to-playlist ()
-  "Add the marked tracks (or the one at point) to a playlist, new or existing."
-  (interactive)
-  (let* ((tracks (my/music-lib--targets))
-         (file (my/music--read-playlist (format "Add %d track%s to playlist: "
-                                                (length tracks) (if (cdr tracks) "s" ""))))
-         (before (and (file-exists-p file) (my/music--playlist-tracks file))))
+(defun my/music--add-to-playlist (file tracks)
+  "Append TRACKS to playlist FILE (created if new) and redraw what shows it."
+  (let ((before (and (file-exists-p file) (my/music--playlist-tracks file))))
     (my/music--write-playlist file (append before tracks))
-    (clrhash my/music-lib--marks)
-    (my/music-lib--refresh)
+    ;; adding from the library uses up the marks
+    (when (derived-mode-p 'my/music-library-mode)
+      (clrhash my/music-lib--marks)
+      (my/music-lib--refresh))
+    (when-let ((view (get-buffer (format "*Playlist · %s*" (file-name-base file)))))
+      (with-current-buffer view (my/music-lib--refresh)))
     (my/music-page-refresh)
     (message "%s %d track%s to %s" (if before "Added" "Created playlist with")
              (length tracks) (if (cdr tracks) "s" "") (file-name-base file))))
+
+(defun my/music-lib-add-to-playlist ()
+  "Add the marked tracks (or the one at point) to a playlist, new or existing."
+  (interactive)
+  (let ((tracks (my/music-lib--targets)))
+    (my/music--add-to-playlist
+     (my/music--read-playlist (format "Add %d track%s to playlist: "
+                                      (length tracks) (if (cdr tracks) "s" "")))
+     tracks)))
 
 (defun my/music-lib--edit-playlist (fn)
   "Rewrite the shown playlist with FN applied to (TRACKS . ROW-INDEX)."
@@ -2823,6 +2832,282 @@ note: tracks are lists themselves, so playlist rows are tagged with :row."
   (unless my/music--timer
     (setq my/music--timer (run-at-time 1 1 #'my/music-page--tick))))
 
+;;; click menus
+;; ---------------------------------------------------------------------
+
+;; Every row on the music page and in the library has a right-click menu
+;; with what you can do to it.  A left click selects, a double click
+;; plays, and a left click on the progress bar seeks.  The menus only
+;; call the same commands the keys do.
+
+(defmacro my/music--do (&rest body)
+  "A menu action running BODY."
+  `(lambda () (interactive) ,@body))
+
+(defun my/music--menu (title items)
+  "A popup menu keymap called TITLE from ITEMS, in order.
+Each item is \"--\" (a separator), (LABEL :sub ITEMS) for a submenu,
+\(LABEL COMMAND . PROPS) where PROPS go to `menu-item' (:enable FORM,
+:button ...), or nil, which is skipped."
+  (let ((map (make-sparse-keymap title))
+        (n 0))
+    (dolist (item items)
+      (let ((key (vector (intern (format "item-%d" (cl-incf n))))))
+        (pcase item
+          ('nil nil)
+          ((pred stringp) (define-key-after map key (list 'menu-item item)))
+          (`(,label :sub ,sub)
+           (define-key-after map key (list 'menu-item label (my/music--menu label sub))))
+          (`(,label ,command . ,props)
+           (define-key-after map key `(menu-item ,label ,command ,@props))))))
+    map))
+
+(defun my/music--plural (n word)
+  (format "%d %s%s" n word (if (= n 1) "" "s")))
+
+(defun my/music--read-new-playlist ()
+  "Ask for a new playlist's name; return its file."
+  (let* ((name (string-trim (read-string "New playlist name: ")))
+         (file (expand-file-name (concat name ".m3u") (my/music--playlists-dir))))
+    (when (string-empty-p name) (user-error "A playlist needs a name"))
+    file))
+
+(defun my/music--playlist-items (tracks)
+  "Submenu items adding TRACKS to each playlist, or to a new one."
+  (let ((files (my/music--playlists)))
+    `(,@(mapcar (lambda (file)
+                  (list (file-name-base file)
+                        (my/music--do (my/music--add-to-playlist file tracks))))
+                files)
+      ,@(when files '("--"))
+      ("New playlist…" ,(my/music--do (my/music--add-to-playlist
+                                       (my/music--read-new-playlist) tracks))))))
+
+(defun my/music--insert-next (tracks)
+  "Put TRACKS in the queue right after the one playing."
+  (with-current-buffer (my/music--queue-buffer)
+    (let ((inhibit-read-only t)
+          (selected (and emms-playlist-selected-marker
+                         (eq (marker-buffer emms-playlist-selected-marker) (current-buffer))
+                         (marker-position emms-playlist-selected-marker))))
+      (save-excursion
+        (if selected
+            (progn (goto-char selected) (forward-line 1))
+          (goto-char (point-max)))
+        (dolist (track tracks) (emms-playlist-insert-track track)))))
+  (my/music-page-refresh)
+  (message "Playing next: %s" (if (cdr tracks)
+                                   (my/music--plural (length tracks) "track")
+                                 (my/music--title (car tracks)))))
+
+(defun my/music--playing-p (track)
+  (and emms-player-playing-p (eq track (emms-playlist-current-selected-track))))
+
+(defun my/music--track-items (track)
+  "Menu items for TRACK that fit anywhere it appears."
+  (let ((local (not (my/music--url-p track))))
+    `("--"
+      ,(when (my/music--playing-p track) '("Show lyrics" my/music-lyrics))
+      ("Edit tags…" ,(my/music--do (my/music-edit-tags track)) :enable ,local)
+      ("Edit lyrics…" ,(my/music--do (my/music-edit-lyrics track)) :enable ,local)
+      ,(if local
+           (list (concat "Everything by " (my/music--artist track))
+                 (my/music--do (my/music--open-view nil (my/music--artist track))))
+         (list "Download as mp3" (my/music--do (my/music-download track)))))))
+
+(defun my/music--general-items ()
+  "Menu items for the player itself."
+  `((,(if (and emms-player-playing-p (not emms-player-paused-p)) "Pause" "Play")
+     my/music-toggle)
+    ("Next" my/music-next)
+    ("Previous" my/music-previous)
+    ("Volume…" my/music-set-volume)
+    "--"
+    ("Find a track…" ,(my/music--vertico #'my/music-find))
+    ("Library" my/music-library)
+    ("Artists…" ,(my/music--vertico #'my/music-artist))
+    ("Shuffle whole library" my/music-shuffle-all)
+    ("Play a link…" my/music-play-link)
+    ("Search online…" ,(my/music--vertico #'my/music-search-online))
+    "--"
+    ("Queue" :sub (("Shuffle it" my/music-shuffle-queue)
+                   ("Save as playlist…" my/music-save-playlist)
+                   ("Clear it…" my/music-clear-queue)))
+    ("Shuffle mode" my/music-toggle-shuffle
+     :button (:toggle . (bound-and-true-p emms-random-playlist)))
+    (,(format "Repeat: %s (change)"
+              (cond ((bound-and-true-p emms-repeat-track) "one")
+                    ((bound-and-true-p emms-repeat-playlist) "all")
+                    (t "off")))
+     my/music-cycle-repeat)
+    ("New playlist…" my/music-new-playlist)
+    "--"
+    ("Rescan library" my/music-scan)))
+
+(defun my/music-page--menu (item)
+  "The menu for ITEM on the music page (nil: the page itself)."
+  (pcase item
+    (`(queue ,_ ,track)
+     (my/music--menu
+      (my/music--title track)
+      `(("Play" my/music-page-open)
+        ("Add to playlist" :sub ,(my/music--playlist-items (list track)))
+        ("Move up" my/music-page-move-up)
+        ("Move down" my/music-page-move-down)
+        ("Remove from queue" my/music-page-remove)
+        ,@(my/music--track-items track))))
+    (`(playlist ,file)
+     (let ((tracks (my/music--playlist-tracks file)))
+       (my/music--menu
+        (file-name-base file)
+        `(("Play" my/music-page-open :enable ,(and tracks t))
+          ("Shuffle" ,(my/music--do (my/music--queue tracks t)) :enable ,(and tracks t))
+          ("Play next" ,(my/music--do (my/music--insert-next tracks)) :enable ,(and tracks t))
+          ("Add to queue" ,(my/music--do (dolist (track tracks) (my/music--append track))
+                                         (message "Queued %s" (my/music--plural (length tracks) "track")))
+           :enable ,(and tracks t))
+          "--"
+          ("Open (edit, reorder)" my/music-page-edit-playlist)
+          ("Rename…" ,(my/music--do (my/music-rename-playlist file)))
+          ("Duplicate…" ,(my/music--do (my/music-duplicate-playlist file)))
+          ("Delete…" my/music-page-remove)
+          "--"
+          ("New playlist…" my/music-new-playlist)))))
+    (`(now)
+     (let ((track (and emms-player-playing-p (emms-playlist-current-selected-track))))
+       (my/music--menu
+        "Now playing"
+        (append
+         (when track
+           `(("Add to playlist" :sub ,(my/music--playlist-items (list track)))
+             ,@(cdr (my/music--track-items track))
+             "--"))
+         (my/music--general-items)))))
+    (_ (my/music--menu "Music" (my/music--general-items)))))
+
+(defun my/music-lib--menu ()
+  "The menu for the library row at point, or for the marked tracks."
+  (let* ((id (tabulated-list-get-id))
+         (track (and id (my/music-lib--track-of id)))
+         (marked (hash-table-count my/music-lib--marks))
+         (targets (ignore-errors (my/music-lib--targets)))
+         (what (if (> marked 0) (concat " " (my/music--plural marked "marked track")) "")))
+    (my/music--menu
+     (cond ((> marked 0) (my/music--plural marked "marked track"))
+           (track (my/music--title track))
+           (t "Library"))
+     (append
+      (when targets
+        `(("Play" my/music-lib-play :enable ,(and id t))
+          (,(format "Play%s next" what) ,(my/music--do (my/music--insert-next targets)))
+          (,(format "Add%s to queue" what) my/music-lib-queue)
+          (,(format "Add%s to playlist" what) :sub ,(my/music--playlist-items targets))
+          ,@(when my/music-lib--playlist
+              `((,(format "Remove%s from this playlist" what) my/music-lib-remove)
+                ,(when (= marked 0) '("Move up" my/music-lib-move-up))
+                ,(when (= marked 0) '("Move down" my/music-lib-move-down))))
+          "--"
+          ,(when track
+             (if (gethash track my/music-lib--marks)
+                 '("Unmark" my/music-lib-unmark)
+               '("Mark" my/music-lib-mark)))))
+      `(("Mark everything shown" my/music-lib-mark-all)
+        ,(when (> marked 0) '("Unmark all" my/music-lib-unmark-all))
+        ("Play everything shown" my/music-lib-play-all)
+        ("Shuffle everything shown" my/music-lib-shuffle-all)
+        "--"
+        ("Filter…" my/music-lib-filter)
+        ("Only one artist…" ,(my/music--vertico #'my/music-lib-artist))
+        ,(when (or my/music-lib--filter my/music-lib--artist)
+           '("Show everything" my/music-lib-clear)))
+      (when track (my/music--track-items track))
+      '("--" ("Back to the music page" my/music-back-to-page))))))
+
+;; managing playlists
+
+(defun my/music-new-playlist ()
+  "Make a new, empty playlist."
+  (interactive)
+  (let ((file (my/music--read-new-playlist)))
+    (when (file-exists-p file) (user-error "%s already exists" (file-name-base file)))
+    (my/music--write-playlist file nil)
+    (my/music-page-refresh)
+    (message "Made %s — add tracks from the library (l) or any track's menu"
+             (file-name-base file))))
+
+(defun my/music-rename-playlist (file)
+  (let* ((name (string-trim (read-string "Rename playlist to: " (file-name-base file))))
+         (new (expand-file-name (concat name ".m3u") (my/music--playlists-dir))))
+    (when (string-empty-p name) (user-error "A playlist needs a name"))
+    (rename-file file new)
+    ;; a view still showing the old name would write to the old file
+    (when-let ((view (get-buffer (format "*Playlist · %s*" (file-name-base file)))))
+      (kill-buffer view))
+    (my/music-page-refresh)
+    (message "Renamed to %s" name)))
+
+(defun my/music-duplicate-playlist (file)
+  (let* ((name (string-trim (read-string "Name of the copy: "
+                                         (concat (file-name-base file) " copy"))))
+         (new (expand-file-name (concat name ".m3u") (my/music--playlists-dir))))
+    (when (string-empty-p name) (user-error "A playlist needs a name"))
+    (copy-file file new)
+    (my/music-page-refresh)
+    (message "Copied to %s" name)))
+
+;; the clicks
+
+(defun my/music--click-goto (event)
+  "Select the window clicked in EVENT and move point to the click."
+  (let* ((start (event-start event))
+         (win (posn-window start)))
+    (when (window-live-p win) (select-window win))
+    (when (numberp (posn-point start)) (goto-char (posn-point start)))
+    ;; show the row highlighted before the menu opens
+    (redisplay t)))
+
+(defun my/music--click-seek ()
+  "Seek to where the click landed on the progress bar, if it did."
+  (let* ((track (emms-playlist-current-selected-track))
+         (total (and track emms-player-playing-p (emms-track-get track 'info-playing-time)))
+         (column (- (current-column) 2)))
+    (when (and total (> total 0) (get-text-property (point) 'my/music-progress)
+               (<= 0 column 47))
+      (emms-seek-to (* total (/ (+ column 0.5) 48.0)))
+      t)))
+
+(defun my/music--menu-click (event menu-fn)
+  (my/music--click-goto event)
+  (popup-menu (funcall menu-fn) event))
+
+(defun my/music-page-click-menu (event)
+  "Open the menu for what was clicked on the music page."
+  (interactive "e")
+  (my/music--menu-click
+   event (lambda () (my/music-page--menu (get-text-property (point) 'my/music-item)))))
+
+(defun my/music-left-click (event)
+  "Select the clicked row; on the progress bar, seek there."
+  (interactive "e")
+  (my/music--click-goto event)
+  (my/music--click-seek))
+
+(defun my/music-lib-click-menu (event)
+  "Open the menu for the clicked library row."
+  (interactive "e")
+  (my/music--menu-click event #'my/music-lib--menu))
+
+(defun my/music-page-double-click (event)
+  (interactive "e")
+  (my/music--click-goto event)
+  (when (get-text-property (point) 'my/music-item)
+    (my/music-page-open)))
+
+(defun my/music-lib-double-click (event)
+  (interactive "e")
+  (my/music--click-goto event)
+  (when (tabulated-list-get-id) (my/music-lib-play)))
+
 ;;; keys
 ;; ---------------------------------------------------------------------
 
@@ -2867,7 +3152,12 @@ note: tracks are lists themselves, so playlist rows are tagged with :row."
     "e" #'my/music-page-edit-playlist
     "b" #'my/music-browse
     "R" #'my/music-scan
+    "n" #'my/music-new-playlist
     "?" #'my/music-help
+    [down-mouse-1] #'my/music-left-click
+    [down-mouse-3] #'my/music-page-click-menu
+    [double-mouse-1] #'my/music-page-double-click
+    [mouse-1] #'ignore [mouse-3] #'ignore [drag-mouse-1] #'ignore
     "L" #'my/music-lyrics
     "E" #'my/music-edit-lyrics
     "T" #'my/music-edit-tags
@@ -2978,6 +3268,10 @@ note: tracks are lists themselves, so playlist rows are tagged with :row."
     "E" #'my/music-edit-lyrics
     "T" #'my/music-edit-tags
     (kbd "g r") #'my/music-lib--refresh
+    [down-mouse-1] #'my/music-left-click
+    [down-mouse-3] #'my/music-lib-click-menu
+    [double-mouse-1] #'my/music-lib-double-click
+    [mouse-1] #'ignore [mouse-3] #'ignore [drag-mouse-1] #'ignore
     "q" #'my/music-back-to-page)
 
 ;; media keys while emacs has focus (mpris covers them everywhere else)
