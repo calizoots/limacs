@@ -12,10 +12,6 @@
   :ensure t
   :after evil)
 
-(my/after '(evil vterm-mode)
-          (lambda ()
-            (add-to-list 'evil-emacs-state-modes 'vterm-mode)))
-
 (provide 'my-evil)
 
 ;; my-evil.el ends here

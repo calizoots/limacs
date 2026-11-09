@@ -99,9 +99,10 @@
     (evil-define-key 'normal 'global (kbd "g c") #'evilnc-comment-or-uncomment-lines)
     (evil-define-key 'visual 'global (kbd "g c") #'evilnc-comment-or-uncomment-lines))
 
-  (with-eval-after-load 'vterm
-    (evil-define-key 'normal 'global (kbd "<leader>vt") #'vterm)
-    (global-set-key (kbd "M-]") #'vterm))
+  ;; terminal
+
+  (evil-define-key 'normal 'global (kbd "<leader>vt") #'ghostel)
+  (global-set-key (kbd "M-]") #'ghostel)
 
   ;; useless smartparens shi
 

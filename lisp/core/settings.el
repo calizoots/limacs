@@ -23,6 +23,12 @@
 
 (put 'dired-find-alternate-file 'disabled nil)
 
+;; refresh open buffers when their files change on disk
+(setq auto-revert-verbose nil
+      auto-revert-interval 1
+      global-auto-revert-non-file-buffers t)
+(global-auto-revert-mode 1)
+
 (provide 'settings)
 
 ;;; settings.el ends here

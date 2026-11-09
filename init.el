@@ -40,7 +40,7 @@
 
 (require 'my-vertico)
 (require 'my-evil)
-(require 'my-vterm)
+(require 'my-ghostel)
 (require 'my-company)
 (require 'my-flycheck)
 (require 'my-orderless)
@@ -51,6 +51,8 @@
 (require 'my-consult)
 (require 'my-marginalia)
 (require 'my-ligatures)
+(require 'my-diff-hl)
+(require 'my-claude)
 
 (require 'line-numbers)
 

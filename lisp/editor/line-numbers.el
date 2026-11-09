@@ -6,7 +6,7 @@
                 term-mode
                 eshell-mode
                 shell-mode
-                vterm-mode
+                ghostel-mode
                 magit-status-mode
                 help-mode
                 compilation-mode
