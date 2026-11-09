@@ -58,6 +58,7 @@
 (require 'my-claude)
 (require 'my-music)
 (require 'my-mail)
+(require 'my-search)
 
 (require 'line-numbers)
 
