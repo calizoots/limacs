@@ -56,6 +56,7 @@
 (require 'my-diff-hl)
 (require 'my-claude)
 (require 'my-music)
+(require 'my-mail)
 
 (require 'line-numbers)
 
