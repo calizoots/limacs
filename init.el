@@ -33,6 +33,7 @@
 (require 'my-task)
 (require 'my-task-ui)
 (require 'my-run)
+(require 'my-services)
 
 ;; treesitter
 

@@ -169,6 +169,8 @@
      ((equal (alist-get 'name (cdr tab)) "Music") (all-the-icons-faicon "music"))
      ;; the mail tab from pkgs/my-mail.el
      ((equal (alist-get 'name (cdr tab)) "Mail") (all-the-icons-faicon "envelope"))
+     ;; the services tab from runtime/my-services.el
+     ((equal (alist-get 'name (cdr tab)) "Services") (all-the-icons-faicon "server"))
      (t
       (let ((buf (get-buffer (alist-get 'name (cdr tab)))))
         (when buf
