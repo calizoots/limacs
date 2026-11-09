@@ -37,7 +37,9 @@
       tab-bar-show t
       tab-bar-tab-hints nil
       tab-bar-close-button-show nil   ; we draw our own
-      tab-bar-new-button-show nil)
+      tab-bar-new-button-show nil
+      ;; no raised outline when hovering the × (it drew a 1px line beside it)
+      tab-bar-button-relief 0)
 
 (tab-bar-mode 1)
 
@@ -165,6 +167,8 @@
      (project (all-the-icons-octicon "repo"))
      ;; the music tab from pkgs/my-music.el
      ((equal (alist-get 'name (cdr tab)) "Music") (all-the-icons-faicon "music"))
+     ;; the mail tab from pkgs/my-mail.el
+     ((equal (alist-get 'name (cdr tab)) "Mail") (all-the-icons-faicon "envelope"))
      (t
       (let ((buf (get-buffer (alist-get 'name (cdr tab)))))
         (when buf
