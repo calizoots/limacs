@@ -284,11 +284,14 @@ Return the task object."
                  :on-success (my/task-on-success task)
                  :on-failure (my/task-on-failure task)))
 
+(defvar my/task--health)               ; http checks, further down
+
 (defun my/task-delete (task)
   "Forget a finished TASK and kill its buffers."
   (when (my/task-live-p task)
     (user-error "Stop the task first"))
   (remhash (my/task-id task) my/task--registry)
+  (remhash (my/task-id task) my/task--health)
   (dolist (b (list (my/task-buffer task) (my/task-error-buffer task)))
     (when (buffer-live-p b) (kill-buffer b)))
   (my/task--changed task))
@@ -350,6 +353,125 @@ Return the task object."
   (interactive
    (list (my/task-read "Open task: ")))
   (pop-to-buffer (my/task-buffer task)))
+
+;;; What a task is doing: ports, memory, cpu, http
+;; one ps and one ss call per refresh, shared by every view. tasks lead
+;; their own process group, so a task's pid is the group id of everything
+;; it started (npm -> sh -> node all count towards the same task)
+
+(defvar my/task--usage (make-hash-table :test #'eql)
+  "Process group -> (rss-kb . cpu-percent), summed over the group.")
+
+(defvar my/task-listening nil
+  "Ports listening on this machine, as (port process-group name).")
+
+(defvar my/task--stats-at nil
+  "When the stats were last collected.")
+
+(defun my/task-collect-stats (&optional max-age)
+  "Refresh memory, cpu and listening ports, unless done in the last MAX-AGE seconds."
+  (unless (and max-age my/task--stats-at
+               (< (float-time (time-subtract nil my/task--stats-at)) max-age))
+    (setq my/task--stats-at (current-time))
+    (let ((pid-group (make-hash-table :test #'eql)))
+      (clrhash my/task--usage)
+      (with-temp-buffer
+        (when (zerop (call-process "ps" nil t nil "-e" "-o" "pid=,pgid=,rss=,pcpu="))
+          (goto-char (point-min))
+          (while (re-search-forward "^ *\\([0-9]+\\) +\\([0-9]+\\) +\\([0-9]+\\) +\\([0-9.]+\\)" nil t)
+            (let ((group (string-to-number (match-string 2)))
+                  (rss (string-to-number (match-string 3)))
+                  (cpu (string-to-number (match-string 4))))
+              (puthash (string-to-number (match-string 1)) group pid-group)
+              (let ((sum (gethash group my/task--usage '(0 . 0.0))))
+                (puthash group (cons (+ (car sum) rss) (+ (cdr sum) cpu)) my/task--usage))))))
+      (setq my/task-listening nil)
+      (with-temp-buffer
+        (when (zerop (call-process "ss" nil t nil "-ltnpH"))
+          (goto-char (point-min))
+          (while (not (eobp))
+            (let ((line (buffer-substring (line-beginning-position) (line-end-position))))
+              (when (string-match "\\S-+ +[0-9]+ +[0-9]+ +\\S-*:\\([0-9]+\\) " line)
+                (let* ((port (string-to-number (match-string 1 line)))
+                       (pid (and (string-match "pid=\\([0-9]+\\)" line)
+                                 (string-to-number (match-string 1 line))))
+                       (name (and (string-match "((\"\\([^\"]+\\)\"" line) (match-string 1 line))))
+                  (unless (assq port my/task-listening)
+                    (push (list port (and pid (gethash pid pid-group)) name) my/task-listening)))))
+            (forward-line 1))))
+      (setq my/task-listening (sort my/task-listening (lambda (a b) (< (car a) (car b))))))))
+
+(defun my/task-group (task)
+  "Process group of TASK while it runs."
+  (when-let ((proc (my/task-process task)))
+    (and (process-live-p proc) (process-id proc))))
+
+(defun my/task-ports (task)
+  "Ports TASK (or anything it started) is listening on."
+  (when-let ((group (my/task-group task)))
+    (mapcar #'car (seq-filter (lambda (p) (eql (nth 1 p) group)) my/task-listening))))
+
+(defun my/task-usage (task)
+  "(rss-kb . cpu-percent) of TASK and everything it started, or nil."
+  (when-let ((group (my/task-group task)))
+    (gethash group my/task--usage)))
+
+(defun my/task-format-size (kb)
+  (cond ((< kb 1024) (format "%d KB" kb))
+        ((< kb (* 1024 1024)) (format "%d MB" (/ kb 1024)))
+        (t (format "%.1f GB" (/ kb 1048576.0)))))
+
+(defun my/task-service-url (task)
+  "TASK's url: the one it printed, else its first port on localhost."
+  (or (my/task-url task)
+      (when-let ((port (car (my/task-ports task))))
+        (format "http://localhost:%d" port))))
+
+;; http checks: one request when a server comes up (and on demand), not
+;; on a timer. every check is a line in the server's own log, and whether
+;; it's still listening is already known from ss
+
+(defvar my/task--health (make-hash-table :test #'eql)
+  "Task id -> (code ms) or (down).")
+
+(defvar my/task--checking (make-hash-table :test #'eql))
+
+(defun my/task-check (task &optional again)
+  "Ask TASK's url for a response, in the background.
+Only once per task, unless AGAIN."
+  (let* ((id (my/task-id task))
+         (url (my/task-service-url task))
+         (last (gethash id my/task--health)))
+    (when (and url (my/task-live-p task) (not (gethash id my/task--checking))
+               (or again (null last)
+                   ;; printed its url before it was listening: try once it is
+                   (and (eq (car last) 'down) (my/task-ports task))))
+      (puthash id t my/task--checking)
+      (let ((buf (generate-new-buffer " *task-check*")))
+        (make-process
+         :name "task-check" :buffer buf :noquery t
+         :command (list "curl" "-s" "-o" "/dev/null" "-m" "3" "-w" "%{http_code} %{time_total}" url)
+         :sentinel (lambda (proc _)
+                     (unless (process-live-p proc)
+                       (let ((out (with-current-buffer buf (buffer-string))))
+                         (kill-buffer buf)
+                         (remhash id my/task--checking)
+                         (puthash id
+                                  (if (and (string-match "\\`\\([0-9]+\\) \\([0-9.]+\\)" out)
+                                           (> (string-to-number (match-string 1 out)) 0))
+                                      (list (string-to-number (match-string 1 out))
+                                            (round (* 1000 (string-to-number (match-string 2 out)))))
+                                    (list 'down))
+                                  my/task--health)
+                         (my/task--changed task)))))))))
+
+(defun my/task-health (task)
+  "TASK's last http check: (code ms), (down), (gone) once it stopped
+listening, or nil if never checked."
+  (let ((health (gethash (my/task-id task) my/task--health)))
+    (if (and health (not (eq (car health) 'down)) (null (my/task-ports task)))
+        '(gone)
+      health)))
 
 ;;; Log buffers
 

@@ -26,7 +26,12 @@
 ;; ---------------------------------------------------------------------
 ;; In the panel:   RET open log / run config   r run or restart   s stop
 ;;                 o open URL in browser        x remove finished  X clear finished
-;;                 a add config   e edit configs   g refresh   q close
+;;                 A start every server         S stop everything
+;;                 a add config   e edit configs   v Services page   g refresh   q close
+;;
+;; The panel and the Services page (my-services.el) are two views of the
+;; same processes: same rows, same keys. The panel is one project at the
+;; bottom of a tab, Services is every project in a tab of its own.
 ;; In a log:       q / DEL back to list   r restart   s stop   o open URL
 
 (require 'cl-lib)
@@ -40,6 +45,8 @@
 (declare-function evil-set-initial-state "evil-core")
 (declare-function my/project-root "projects")
 (declare-function my/with-vertico "my-vertico")
+(declare-function my/services-show-project "my-services")
+(declare-function notifications-notify "notifications")
 
 ;;; project root
 ;; ---------------------------------------------------------------------
@@ -165,23 +172,56 @@
 (defvar my/run--last (make-hash-table :test #'equal)
   "Last configuration run in each project root.")
 
-(defun my/run-spec (spec root)
-  "Run configuration SPEC in ROOT and show it in the Run panel."
-  (puthash root spec my/run--last)
+(defun my/run-start (spec root)
+  "Start configuration SPEC in ROOT (in the background) and return the task.
+One instance per configuration: an old one is stopped, old logs dropped."
   (let ((command (plist-get spec :command)))
-    ;; one instance per configuration: stop the old one, drop old logs
     (dolist (task (my/run--tasks root))
       (when (equal (my/task-command task) command)
         (if (my/task-live-p task)
             (my/task-cancel task)
           (my/task-delete task))))
-    (let ((task (my/task-start :name (plist-get spec :name)
-                               :command command
-                               :directory root
-                               :project root
-                               :kind (plist-get spec :kind))))
-      (my/run-panel-show root task)
-      task)))
+    (my/task-start :name (plist-get spec :name)
+                   :command command
+                   :directory root
+                   :project root
+                   :kind (plist-get spec :kind))))
+
+(defun my/run-spec (spec root)
+  "Run configuration SPEC in ROOT and show it in the Run panel."
+  (puthash root spec my/run--last)
+  (let ((task (my/run-start spec root)))
+    (my/run-panel-show root task)
+    task))
+
+(defun my/run-servers (root)
+  "ROOT's configurations marked as servers."
+  (seq-filter (lambda (spec) (eq (plist-get spec :kind) 'server))
+              (ignore-errors (my/run-configs root))))
+
+(defun my/run-start-servers (root)
+  "Start every server of ROOT that isn't running.  Return the new tasks."
+  (let* ((live (seq-filter #'my/task-live-p (my/run--tasks root)))
+         (todo (seq-remove (lambda (spec)
+                             (seq-some (lambda (task) (equal (my/task-command task)
+                                                             (plist-get spec :command)))
+                                       live))
+                           (my/run-servers root))))
+    (unless todo
+      (user-error (if (my/run-servers root)
+                      "Every server in %s is already running"
+                    "%s has no servers (mark a config :kind server, a to add one)")
+                  (my/run--project-name root)))
+    (prog1 (mapcar (lambda (spec) (my/run-start spec root)) todo)
+      (message "Started %s" (mapconcat (lambda (s) (plist-get s :name)) todo ", ")))))
+
+(defun my/run-stop-all (root)
+  "Stop everything running in ROOT, after asking."
+  (let ((live (seq-filter #'my/task-live-p (my/run--tasks root))))
+    (unless live (user-error "Nothing running in %s" (my/run--project-name root)))
+    (when (y-or-n-p (format "Stop %d process%s in %s? " (length live)
+                            (if (= (length live) 1) "" "es") (my/run--project-name root)))
+      (mapc #'my/task-cancel live))))
 
 (defun my/run--spec-label (spec)
   (concat (string-pad (plist-get spec :name) 20)
@@ -370,24 +410,47 @@
                             (format "exit %d" (my/task-exit-code task))
                           "failed")))))
 
+(defun my/run--health-text (task)
+  (pcase (my/task-health task)
+    ('nil "")
+    (`(gone) (propertize "not listening" 'face 'warning))
+    (`(down) (propertize "down" 'face 'error))
+    (`(,code ,ms)
+     (concat (propertize (number-to-string code)
+                         'face (cond ((< code 400) 'success) ((< code 500) 'warning) (t 'error)))
+             (propertize (format " · %dms" ms) 'face 'shadow)))))
+
+(defun my/run-task-row (task)
+  "One line for TASK, the same in the Run panel and on the Services page:
+status, name, ports, http check (or state), uptime, memory, cpu, then
+the url (or the command)."
+  (pcase-let* ((`(,glyph ,face ,state) (my/run--status task))
+               (live (my/task-live-p task))
+               (usage (my/task-usage task))
+               (ports (my/task-ports task))
+               (url (and live (my/task-service-url task)))
+               (health (my/run--health-text task)))
+    (concat (propertize glyph 'face face) " "
+            (propertize (truncate-string-to-width (my/task-name task) 16 nil ?\s "…") 'face 'bold)
+            "  "
+            (string-pad (if ports (mapconcat (lambda (p) (format ":%d" p)) ports " ") "") 12)
+            (string-pad (if (and live (not (string-empty-p health))) health
+                          (propertize state 'face face))
+                        14)
+            (string-pad (my/task-format-duration (my/task-duration task)) 9 nil t)
+            "  "
+            (propertize (string-pad (if usage (my/task-format-size (car usage)) "") 8 nil t) 'face 'shadow)
+            (propertize (string-pad (if usage (format "%.1f%%" (cdr usage)) "") 7 nil t) 'face 'shadow)
+            "   "
+            (if url
+                (propertize url 'face 'link)
+              (propertize (truncate-string-to-width
+                           (my/run--command-string (my/task-command task)) 40 nil nil "…")
+                          'face 'shadow))
+            "\n")))
+
 (defun my/run-panel--task-row (task)
-  (pcase-let ((`(,glyph ,face ,state) (my/run--status task)))
-    (propertize
-     (concat "  "
-             (propertize glyph 'face face) " "
-             (propertize (truncate-string-to-width (my/task-name task) 18 nil ?\s "…")
-                         'face 'bold)
-             "  "
-             (propertize (truncate-string-to-width
-                          (my/run--command-string (my/task-command task)) 34 nil ?\s "…")
-                         'face 'shadow)
-             "  "
-             (propertize (string-pad state 9) 'face face)
-             (string-pad (my/task-format-duration (my/task-duration task)) 9 nil t)
-             "   "
-             (if (my/task-url task) (propertize (my/task-url task) 'face 'link) "")
-             "\n")
-     'my-run-item task)))
+  (propertize (concat "  " (my/run-task-row task)) 'my-run-item task))
 
 (defun my/run-panel--spec-row (spec)
   (propertize
@@ -455,9 +518,47 @@
 
 (add-hook 'my/task-changed-hook #'my/run-panel--refresh-all)
 
+(defvar my/run-notify t
+  "Non-nil to pop a desktop notification when a server crashes.")
+
+(defvar my/run--told (make-hash-table :test #'eql)
+  "Tasks whose crash was already reported.")
+
+(defun my/run--on-crash (task)
+  "Tell you when a server dies on its own (stopping it yourself is quiet)."
+  (when (and (eq (my/task-kind task) 'server)
+             (eq (my/task-status task) 'failed)
+             (not (gethash (my/task-id task) my/run--told)))
+    (puthash (my/task-id task) t my/run--told)
+    (let ((text (format "%s%s stopped%s"
+                        (my/task-name task)
+                        (if (my/task-project task)
+                            (format " (%s)" (my/run--project-name (my/task-project task)))
+                          "")
+                        (if (my/task-exit-code task)
+                            (format " with exit code %d" (my/task-exit-code task))
+                          ""))))
+      (message "%s" (propertize text 'face 'error))
+      (when (and my/run-notify (require 'notifications nil t))
+        (ignore-errors (notifications-notify :title "Server stopped" :body text :app-name "Emacs"))))))
+
+(add-hook 'my/task-changed-hook #'my/run--on-crash)
+
 ;; tick once a second while something runs, so uptimes stay current
 (defvar my/run--timer nil)
+
+(defun my/run--views-visible-p ()
+  "Non-nil when a Run panel or the Services page is on screen."
+  (seq-some (lambda (buf)
+              (and (memq (buffer-local-value 'major-mode buf) '(my/run-panel-mode my/services-mode))
+                   (get-buffer-window buf t)))
+            (buffer-list)))
+
 (defun my/run--tick ()
+  (when (and (seq-some #'my/task-live-p (my/task-all)) (my/run--views-visible-p))
+    (my/task-collect-stats 1.5)
+    (dolist (task (my/task-all))
+      (when (my/task-live-p task) (my/task-check task))))
   (when (seq-some #'my/task-live-p (my/task-all))
     (dolist (buf (buffer-list))
       (when (and (eq (buffer-local-value 'major-mode buf) 'my/run-panel-mode)
@@ -511,6 +612,21 @@
   (interactive)
   (my/task-delete (my/run-panel--task-at-point)))
 
+(defun my/run-panel-start-servers ()
+  "Start every server of this project."
+  (interactive)
+  (my/run-start-servers my/run-panel--root))
+
+(defun my/run-panel-stop-all ()
+  "Stop everything running in this project."
+  (interactive)
+  (my/run-stop-all my/run-panel--root))
+
+(defun my/run-panel-services ()
+  "Open the Services page at this project."
+  (interactive)
+  (my/services-show-project my/run-panel--root))
+
 (defun my/run-panel-clear ()
   "Remove all finished processes of this project."
   (interactive)
@@ -525,7 +641,7 @@
         '(:eval (concat
                  (propertize (format " Run · %s" (my/run--project-name my/run-panel--root))
                              'face 'bold)
-                 (propertize "    RET open  r run/restart  s stop  o browser  x remove  a add  q close"
+                 (propertize "    RET open  r run/restart  s stop  o browser  A start servers  S stop all  x remove  a add  v services  q close"
                              'face 'shadow))))
   (hl-line-mode 1))
 
@@ -573,6 +689,9 @@
   (define-key map (kbd "o") #'my/run-panel-browse)
   (define-key map (kbd "x") #'my/run-panel-remove)
   (define-key map (kbd "X") #'my/run-panel-clear)
+  (define-key map (kbd "A") #'my/run-panel-start-servers)
+  (define-key map (kbd "S") #'my/run-panel-stop-all)
+  (define-key map (kbd "v") #'my/run-panel-services)
   (define-key map (kbd "a") #'my/run-add)
   (define-key map (kbd "e") #'my/run-edit)
   (define-key map (kbd "g") #'revert-buffer)
@@ -596,6 +715,9 @@
     (kbd "o") #'my/run-panel-browse
     (kbd "x") #'my/run-panel-remove
     (kbd "X") #'my/run-panel-clear
+    (kbd "A") #'my/run-panel-start-servers
+    (kbd "S") #'my/run-panel-stop-all
+    (kbd "v") #'my/run-panel-services
     (kbd "a") #'my/run-add
     (kbd "e") #'my/run-edit
     (kbd "g") #'revert-buffer
