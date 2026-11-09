@@ -2,6 +2,10 @@
 
 ;; modern status bar
 
+;; Left:  mode   project › icon file ●   branch
+;; Right: ♪ track   ▶ running   ✗ errors ⚠ warnings   lsp   language   Ln, Col
+;;        indent   encoding
+;;
 ;; Colors come from the current theme (same palette approach as ui/tabs.el)
 ;; and are rebuilt on every theme change.  Inactive windows show a dimmed,
 ;; reduced line.
@@ -49,7 +53,6 @@
          (err    (my/tab--face-color 'error :foreground "#e55561"))
          (warn   (my/tab--face-color 'warning :foreground "#e2b86b"))
          (ok     (my/tab--face-color 'success :foreground "#5fb85f"))
-         (purple (my/tab--face-color 'font-lock-constant-face :foreground "#c678dd"))
          (border (my/tab--mix fg bg 0.10)))
     ;; flat: editor background, a hairline on top, small text.
     ;; themes style mode-line-active separately, so set every face fully
@@ -71,7 +74,7 @@
     (ignore strip)
     (setq my/ml--state-colors `((normal . ,dim) (insert . ,ok) (visual . ,warn)
                                 (replace . ,err) (operator . ,dim)
-                                (emacs . ,purple) (motion . ,dim))))
+                                (emacs . ,dim) (motion . ,dim))))
   (force-mode-line-update t))
 
 ;;; segments
@@ -146,6 +149,17 @@ Less important segments disappear first as a window gets narrower."
                             'local-map (make-mode-line-mouse-map 'mouse-1 #'my/run-panel-toggle))
                 "   ")))))
 
+(defun my/ml-music ()
+  (when (and (my/ml--active-p) (my/ml--fits 120) (fboundp 'my/music-now-playing))
+    (when-let ((playing (my/music-now-playing)))
+      (concat (propertize (concat (if (bound-and-true-p emms-player-paused-p) "⏸ " "♪ ")
+                                  (truncate-string-to-width playing 40 nil nil "…"))
+                          'face 'my/ml-dim
+                          'help-echo "Play / pause (SPC m SPC)"
+                          'mouse-face 'mode-line-highlight
+                          'local-map (make-mode-line-mouse-map 'mouse-1 #'emms-pause))
+              "   "))))
+
 (defun my/ml-diagnostics ()
   (when (and (bound-and-true-p flycheck-mode) (my/ml--active-p))
     (pcase flycheck-last-status-change
@@ -213,6 +227,7 @@ Less important segments disappear first as a window gets narrower."
                 (:eval (my/ml-vc))
                 "    "
                 mode-line-format-right-align
+                (:eval (my/ml-music))
                 (:eval (my/ml-tasks))
                 (:eval (my/ml-diagnostics))
                 (:eval (my/ml-lsp))

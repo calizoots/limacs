@@ -161,14 +161,17 @@
 
 (defun my/tab--icon (tab project)
   (ignore-errors
-    (if project
-        (all-the-icons-octicon "repo")
+    (cond
+     (project (all-the-icons-octicon "repo"))
+     ;; the music tab from pkgs/my-music.el
+     ((equal (alist-get 'name (cdr tab)) "Music") (all-the-icons-faicon "music"))
+     (t
       (let ((buf (get-buffer (alist-get 'name (cdr tab)))))
         (when buf
           (with-current-buffer buf
             (if buffer-file-name
                 (all-the-icons-icon-for-file buffer-file-name)
-              (all-the-icons-icon-for-mode major-mode))))))))
+              (all-the-icons-icon-for-mode major-mode)))))))))
 
 (defun my/tab--label (tab project)
   (let ((s (if project (plist-get project :name) (alist-get 'name (cdr tab)))))

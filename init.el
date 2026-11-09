@@ -55,6 +55,7 @@
 (require 'my-ligatures)
 (require 'my-diff-hl)
 (require 'my-claude)
+(require 'my-music)
 
 (require 'line-numbers)
 

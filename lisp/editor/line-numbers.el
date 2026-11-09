@@ -19,7 +19,8 @@
 (defvar my/no-line-numbers-modes
   '(org-mode term-mode eshell-mode shell-mode ghostel-mode
     magit-status-mode help-mode compilation-mode
-    my/run-panel-mode my/task-log-mode neotree-mode)
+    my/run-panel-mode my/task-log-mode neotree-mode
+    emms-browser-mode emms-playlist-mode my/music-mode my/music-library-mode my/music-match-mode)
   "Major modes (and modes derived from them) that never show line numbers.")
 
 (defun my/skip-line-numbers-p ()

@@ -21,3 +21,7 @@ url/
 ._*
 
 themes/
+
+# music player state (library cache, playlists, volume)
+emms/
+music/
