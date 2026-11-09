@@ -26,6 +26,8 @@
 ;;   SPC m r  shuffle the whole library   SPC m u  play a link
 ;;   SPC m o  search online               SPC m R  rescan the library
 ;;   SPC m l  the library                 SPC m A  pick an artist
+;;   SPC m L  show / hide lyrics           SPC m Y  download lyrics for everything
+;;   SPC m e  edit lyrics (and stamp them) SPC m t  edit tags
 ;;
 ;; Keys on the Music page
 ;; ---------------------------------------------------------------------
@@ -40,6 +42,14 @@
 ;;   l    library (search, mark, build playlists)
 ;;   A    pick an artist         e    edit the playlist at point
 ;;   b    browse by artist       R    rescan         q  close
+;;   L    lyrics panel (RET on a line jumps there, r looks again,
+;;        P pops it out into its own window / docks it back, t pins it on top,
+;;        + - = text size, e edit the lyrics)
+;;   E    edit lyrics of the track at point   T  edit its tags
+;;
+;; Lyrics editor: type or paste lines, ,0 plays the song from the start,
+;; then RET as each line begins stamps it. ,j replays from a line, ,- ,=
+;; nudge a stamp by 0.1s, ,u removes one, ZZ saves into the song
 ;;
 ;; Keys on the match screen (Spotify links)
 ;; ---------------------------------------------------------------------
@@ -60,6 +70,10 @@
 (require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
+(require 'color)
+(require 'xml)
+(require 'url-util)
+(require 'json)
 
 ;; emms variables this file let-binds before emms is loaded; declaring them
 ;; keeps those bindings dynamic
@@ -409,12 +423,15 @@ re-read, and anything gone (or junk) is dropped from the cache."
       (let ((state (ignore-errors
                      (with-temp-buffer (insert-file-contents file) (read (current-buffer))))))
         (when (numberp (plist-get state :volume))
-          (setq my/music-volume (plist-get state :volume)))))))
+          (setq my/music-volume (plist-get state :volume)))
+        (when (memq (plist-get state :lyrics-prefer) '(ask local online))
+          (setq my/music-lyrics-prefer (plist-get state :lyrics-prefer)))))))
 
 (defun my/music--save-state ()
   (make-directory my/music-state-directory t)
   (with-temp-file (my/music--state-file)
-    (prin1 (list :volume my/music-volume) (current-buffer))))
+    (prin1 (list :volume my/music-volume :lyrics-prefer my/music-lyrics-prefer)
+           (current-buffer))))
 
 (defun my/music--apply-volume (&rest _)
   (when (and emms-player-playing-p (fboundp 'emms-player-mpv-cmd))
@@ -642,6 +659,132 @@ file is named and tagged with those instead of the uploader's."
          (when (zerop (process-exit-status proc)) (kill-buffer log))
          (my/music-page-refresh))))))
 
+;;; covers
+;; ---------------------------------------------------------------------
+;; pulled out of the mp3 (or a youtube thumbnail for links) by ffmpeg in
+;; the background, cropped square and cached under music/covers/
+
+(defvar my/music-cover-size 112
+  "Pixel size of the cover on the music page.")
+
+(defvar my/music--cover-jobs (make-hash-table :test #'equal)
+  "Cover files being extracted right now.")
+
+(defvar my/music--cover-data (make-hash-table :test #'equal)
+  "Cover file -> its base64 contents, so redraws don't reread it.")
+
+(defun my/music--cover-source (track)
+  "Where TRACK's cover comes from: its file, a youtube thumbnail or nil."
+  (let ((name (emms-track-name track)))
+    (if (my/music--url-p track)
+        (when (string-match "\\(?:v=\\|youtu\\.be/\\)\\([A-Za-z0-9_-]\\{11\\}\\)" name)
+          (format "https://i.ytimg.com/vi/%s/mqdefault.jpg" (match-string 1 name)))
+      name)))
+
+(defun my/music--cover (track)
+  "Path of TRACK's cached cover, or nil (and start fetching it if needed)."
+  (when-let ((source (and track (my/music--cover-source track))))
+    (let* ((dir (expand-file-name "covers/" my/music-state-directory))
+           (file (expand-file-name (concat (md5 source) ".jpg") dir))
+           (none (concat file ".none")))
+      (cond ((file-exists-p file) file)
+            ((or (file-exists-p none) (gethash file my/music--cover-jobs)) nil)
+            ((executable-find "ffmpeg")
+             (make-directory dir t)
+             (puthash file t my/music--cover-jobs)
+             (make-process
+              :name "music-cover" :noquery t :buffer nil
+              :command (list "ffmpeg" "-v" "quiet" "-y" "-i" source "-map" "0:v:0"
+                             "-frames:v" "1"
+                             "-vf" "crop='min(iw,ih)':'min(iw,ih)',scale=256:256"
+                             file)
+              :sentinel (lambda (proc _)
+                          (unless (process-live-p proc)
+                            (remhash file my/music--cover-jobs)
+                            (if (and (file-exists-p file)
+                                     (> (file-attribute-size (file-attributes file)) 0))
+                                (my/music-page-refresh)
+                              ;; no art: remember that, but let links try again later
+                              (ignore-errors (delete-file file))
+                              (unless (string-prefix-p "http" source)
+                                (write-region "" nil none nil 'quiet))))))
+             nil)))))
+
+(defun my/music--cover-base64 (file)
+  (or (gethash file my/music--cover-data)
+      (puthash file
+               (with-temp-buffer
+                 (set-buffer-multibyte nil)
+                 (insert-file-contents-literally file)
+                 (base64-encode-region (point-min) (point-max) t)
+                 (buffer-string))
+               my/music--cover-data)))
+
+(defun my/music--color (face attr fallback)
+  "FACE's ATTR as #rrggbb, or FALLBACK."
+  (let* ((c (face-attribute face attr nil t))
+         (rgb (and (stringp c) (color-name-to-rgb c))))
+    (if rgb (apply #'color-rgb-to-hex (append rgb '(2))) fallback)))
+
+(defun my/music--blend (a b amount)
+  "Colour AMOUNT of the way from A to B (both #rrggbb)."
+  (apply #'color-rgb-to-hex
+         (append (cl-mapcar (lambda (x y) (+ x (* amount (- y x))))
+                            (color-name-to-rgb a) (color-name-to-rgb b))
+                 '(2))))
+
+(defun my/music--fit (string px width)
+  "STRING cut down to fit WIDTH pixels at font size PX."
+  (let ((chars (max 4 (floor (/ width (* 0.6 px))))))
+    (truncate-string-to-width string chars nil nil "…")))
+
+(defun my/music-page--card (track)
+  "The now-playing card: cover on the left, title and details beside it."
+  (let* ((size my/music-cover-size)
+         (win (get-buffer-window (current-buffer) t))
+         (width (min 760 (- (if win (window-body-width win t) 800)
+                            (* 4 (frame-char-width)))))
+         (px (or (ignore-errors (aref (font-info (face-font 'default)) 2))
+                 (frame-char-height)))
+         (family (xml-escape-string
+                  (let ((f (face-attribute 'default :family nil t)))
+                    (if (stringp f) f "monospace"))))
+         (fg (my/music--color 'default :foreground "#dfe1e5"))
+         (bg (my/music--color 'default :background "#1e1f22"))
+         (dim (my/music--color 'shadow :foreground "#9da0a8"))
+         (tile (my/music--blend bg fg 0.07))
+         (cover (my/music--cover track))
+         (text-x (+ size 20))
+         (text-w (- width text-x))
+         (title (if track (my/music--title track) "Nothing playing"))
+         (meta (if track
+                   (string-join (delq nil (list (emms-track-get track 'info-artist)
+                                                (emms-track-get track 'info-album)
+                                                (emms-track-get track 'info-year)
+                                                (and (my/music--url-p track) "link")))
+                                "  ·  ")
+                 "/ find a track   o search online   u play a link"))
+         (title-px (* px 1.5))
+         (svg
+          (concat
+           (format "<svg xmlns='http://www.w3.org/2000/svg' xmlns:xlink='http://www.w3.org/1999/xlink' width='%d' height='%d'>"
+                   width size)
+           (format "<clipPath id='c'><rect width='%d' height='%d' rx='8'/></clipPath>" size size)
+           (format "<rect width='%d' height='%d' rx='8' fill='%s'/>" size size tile)
+           (if cover
+               (format "<image width='%d' height='%d' clip-path='url(#c)' preserveAspectRatio='xMidYMid slice' xlink:href='data:image/jpeg;base64,%s'/>"
+                       size size (my/music--cover-base64 cover))
+             (format "<text x='%d' y='%d' text-anchor='middle' font-family='%s' font-size='%dpx' fill='%s'>♪</text>"
+                     (/ size 2) (+ (/ size 2) (round (* size 0.13))) family (round (* size 0.38)) dim))
+           (format "<text x='%d' y='%.1f' font-family='%s' font-size='%.1fpx' font-weight='bold' fill='%s'>%s</text>"
+                   text-x (- (/ size 2.0) (* px 0.4)) family title-px fg
+                   (xml-escape-string (my/music--fit title title-px text-w)))
+           (format "<text x='%d' y='%.1f' xml:space='preserve' font-family='%s' font-size='%.1fpx' fill='%s'>%s</text>"
+                   text-x (+ (/ size 2.0) (* px 1.3)) family (float px) dim
+                   (xml-escape-string (my/music--fit meta px text-w)))
+           "</svg>")))
+    (propertize " " 'display (create-image svg 'svg t :ascent 'center :scale 1))))
+
 ;;; the music page
 ;; ---------------------------------------------------------------------
 
@@ -701,24 +844,14 @@ file is named and tagged with those instead of the uploader's."
                          (get-buffer-window-list (current-buffer) nil t)))
          (track (and emms-player-playing-p (emms-playlist-current-selected-track)))
          (queue (my/music--queue-items))
+         (win (get-buffer-window (current-buffer) t))
+         ;; queue rows shrink to fit when the lyrics panel takes some room
+         (desc-width (max 20 (min 72 (- (if win (window-body-width win) 100) 18))))
          (playlists (my/music--playlists)))
     (erase-buffer)
     ;; now playing
-    (insert "\n")
-    (if track
-        (insert "  " (propertize (my/music--title track) 'face '(:weight bold :height 1.4)) "\n"
-                "  " (propertize (string-join
-                                  (delq nil (list (emms-track-get track 'info-artist)
-                                                  (emms-track-get track 'info-album)
-                                                  (emms-track-get track 'info-year)
-                                                  (and (my/music--url-p track) "link")))
-                                  "  ·  ")
-                                 'face 'shadow)
-                "\n\n"
-                (my/music-page--progress))
-      (insert "  " (propertize "Nothing playing" 'face '(:weight bold :height 1.4)) "\n"
-              "  " (propertize "/ find a track   o search online   u play a link" 'face 'shadow)
-              "\n\n\n"))
+    (insert "\n  " (my/music-page--card track) "\n\n")
+    (insert (if track (my/music-page--progress) "\n"))
     (insert (my/music-page--status))
     ;; queue
     (insert (my/music-page--heading "Queue" (length queue)))
@@ -730,7 +863,7 @@ file is named and tagged with those instead of the uploader's."
             (let ((row (concat (if selected (propertize "  ▶ " 'face 'success) "    ")
                                (propertize (format "%3d  " (cl-incf n)) 'face 'shadow)
                                (truncate-string-to-width (my/music--description qtrack)
-                                                         72 nil ?\s "…")
+                                                         desc-width nil ?\s "…")
                                "  "
                                (propertize (my/music--time
                                             (emms-track-get qtrack 'info-playing-time))
@@ -886,9 +1019,13 @@ file is named and tagged with those instead of the uploader's."
   (setq-local revert-buffer-function (lambda (&rest _) (my/music-page--render)))
   (setq header-line-format
         (concat (propertize " Music" 'face 'bold)
-                (propertize "    RET play   p pause   ] [ skip   / find   l library   A artist   u link   o online   + - volume   ? more"
+                (propertize "    RET play   p pause   ] [ skip   / find   l library   A artist   u link   o online   + - volume   L lyrics   ? more"
                             'face 'shadow)))
-  (hl-line-mode 1))
+  (hl-line-mode 1)
+  ;; drop an image here to make it the cover of the track at point
+  (setq-local dnd-protocol-alist
+              (append '(("^file:" . my/music-page--drop) ("^https?://" . my/music-page--drop))
+                      dnd-protocol-alist)))
 
 (defun my/music-help ()
   "Show every key on the music page."
@@ -897,7 +1034,1037 @@ file is named and tagged with those instead of the uploader's."
                    "/ find&play  a add  u link  o online  D download link  "
                    "d remove  J K move  c clear  w save playlist  "
                    "s shuffle queue  S shuffle mode  r repeat  l library  A artist  "
-                   "e edit playlist  b browse  R rescan  q close")))
+                   "e edit playlist  b browse  R rescan  L lyrics  E edit lyrics  T tags  q close")))
+
+;;; lyrics
+;; ---------------------------------------------------------------------
+;; a panel beside the music page (L shows / hides it). lyrics come from
+;; lrclib.net (free, no account); synced ones light up line by line and
+;; RET jumps the song to a line. when lrclib has nothing, the file's own
+;; lyrics tag is used. results are cached under music/lyrics/
+
+(defvar my/music-lyrics-buffer "*Lyrics*")
+
+(defvar my/music-lyrics-width 0.4
+  "Width of the lyrics panel, as a fraction of the frame.")
+
+(defvar my/music-lyrics-agent "limacs-music (https://github.com/calizoots/limacs)"
+  "User agent sent to lrclib, which asks clients to name themselves.")
+
+(defvar my/music--lyrics (make-hash-table :test #'equal)
+  "Track name -> lyrics plist, or `pending' while it's being fetched.
+The plist has :source and one of :synced ((SECONDS . LINE) ...),
+:plain TEXT, :instrumental t or :none t.")
+
+(defvar my/music-lyrics--timer nil)
+
+(defvar-local my/music-lyrics--track nil "Track the panel is showing.")
+(defvar-local my/music-lyrics--line nil "Index of the highlighted line.")
+(defvar-local my/music-lyrics--overlay nil)
+(defvar-local my/music-lyrics--snap t
+  "Non-nil to jump to the current line even if the panel has focus.")
+
+(defun my/music--lyrics-file (name)
+  (expand-file-name (concat (md5 name) ".eld")
+                    (expand-file-name "lyrics/" my/music-state-directory)))
+
+(defun my/music--parse-lrc (text)
+  "Timed lines of LRC TEXT as ((SECONDS . LINE) ...), or nil if it has none."
+  (let (lines)
+    (dolist (line (split-string text "\n"))
+      (when (string-match "\\`\\[\\([0-9]+\\):\\([0-9.]+\\)\\]\\s-*\\(.*\\)" line)
+        (push (cons (+ (* 60 (string-to-number (match-string 1 line)))
+                       (string-to-number (match-string 2 line)))
+                    (string-trim (match-string 3 line)))
+              lines)))
+    (nreverse lines)))
+
+(defun my/music--lyrics-from (hit source)
+  "Lyrics plist from lrclib HIT (or a tag), or nil if it holds none."
+  (let ((synced (plist-get hit :syncedLyrics))
+        (plain (plist-get hit :plainLyrics)))
+    (cond ((plist-get hit :instrumental) (list :source source :instrumental t))
+          ((and (stringp synced) (my/music--parse-lrc synced))
+           (list :source source :synced (my/music--parse-lrc synced)))
+          ((and (stringp plain) (not (string-blank-p plain)))
+           (list :source source :plain (string-trim plain))))))
+
+(defun my/music--fetch-json (url callback)
+  "Fetch URL with curl and call CALLBACK with the parsed JSON and success."
+  (let ((buf (generate-new-buffer " *music-lyrics*")))
+    (make-process
+     :name "music-lyrics" :buffer buf :noquery t
+     :command (list "curl" "-s" "-m" "15" "-A" my/music-lyrics-agent url)
+     :sentinel (lambda (proc _)
+                 (unless (process-live-p proc)
+                   (let ((ok (zerop (process-exit-status proc)))
+                         (data (with-current-buffer buf
+                                 (ignore-errors
+                                   (json-parse-string (buffer-string)
+                                                      :object-type 'plist :array-type 'list
+                                                      :null-object nil :false-object nil)))))
+                     (kill-buffer buf)
+                     (funcall callback data ok)))))))
+
+(defun my/music--clean-title (title)
+  "TITLE without (feat. …), [edit] and other bracketed extras."
+  (string-trim (replace-regexp-in-string "\\s-*[([][^])]*[])]" "" title)))
+
+(defun my/music--tag-lyrics (track)
+  "Lyrics from TRACK's own file tags, or nil."
+  (unless (my/music--url-p track)
+    (with-temp-buffer
+      (when (zerop (call-process "ffprobe" nil t nil "-v" "quiet" "-show_entries"
+                                 "format_tags" "-of" "json" (emms-track-name track)))
+        (goto-char (point-min))
+        (let* ((json (ignore-errors (json-parse-buffer :object-type 'alist)))
+               (tags (alist-get 'tags (alist-get 'format json)))
+               (text (cdr (seq-find (lambda (kv) (string-prefix-p "lyrics" (downcase (symbol-name (car kv)))))
+                                    tags))))
+          (when (and (stringp text) (not (string-blank-p text)))
+            (if (my/music--parse-lrc text)
+                (list :source "the song file" :synced (my/music--parse-lrc text))
+              (list :source "the song file" :plain (string-trim text)))))))))
+
+(defvar my/music-lyrics-prefer 'ask
+  "What `r' does when a song already has lyrics in its file and lrclib has
+some too: `ask', keep the `local' ones, or take the `online' ones.")
+
+(defvar my/music-lyrics-store t
+  "Non-nil to write lyrics found online into the song's own file.")
+
+(defun my/music--lyrics-done (name result)
+  "Store RESULT as the lyrics for track NAME and redraw the panel.
+Songs keep their lyrics in their own file; the small cache under
+music/lyrics/ only remembers links and songs nothing was found for."
+  (if (null result)
+      (remhash name my/music--lyrics)
+    (puthash name result my/music--lyrics)
+    (when (and (not (plist-get result :offline))
+               (or (string-prefix-p "http" name) (plist-get result :none)))
+      (let ((file (my/music--lyrics-file name)))
+        (make-directory (file-name-directory file) t)
+        (with-temp-file file (prin1 result (current-buffer))))))
+  (my/music-lyrics--render))
+
+(defun my/music--norm (string)
+  "STRING lowercased with only letters and digits, for loose comparing."
+  (replace-regexp-in-string "[^[:alnum:]]+" "" (downcase (or string ""))))
+
+(defun my/music--lrclib-match-p (hit artist title duration)
+  "Non-nil when lrclib HIT really looks like this song.
+Lyrics get written into files, so a doubtful match is worse than none:
+the title has to match, and the artist too when we know it (otherwise
+the length has to be within a few seconds)."
+  (let* ((want (my/music--norm (my/music--clean-title title)))
+         (got (my/music--norm (my/music--clean-title (plist-get hit :trackName))))
+         (artists (seq-remove #'string-empty-p
+                              (mapcar #'my/music--norm (split-string (or artist "") "\\s-*[,&]\\s-*"))))
+         (hit-artist (my/music--norm (plist-get hit :artistName)))
+         (length-ok (and duration (numberp (plist-get hit :duration))
+                         (< (abs (- duration (plist-get hit :duration))) 4))))
+    (and (>= (length want) 2) (>= (length got) 2)
+         (or (string-search want got) (string-search got want))
+         (if artists
+             (seq-some (lambda (a) (or (string-search a hit-artist) (string-search hit-artist a)))
+                       artists)
+           length-ok))))
+
+(defun my/music--lrclib-lookup (track callback)
+  "Look TRACK up on lrclib; call CALLBACK with a lyrics plist (or nil) and
+whether lrclib could be reached."
+  (let* ((artist (car (split-string (or (emms-track-get track 'info-artist) "") "\\s-*[,&]\\s-*")))
+         (title (my/music--title track))
+         (duration (emms-track-get track 'info-playing-time))
+         (search
+          (lambda ()
+            (my/music--fetch-json
+             (concat "https://lrclib.net/api/search?q="
+                     (url-hexify-string (string-trim (concat artist " " (my/music--clean-title title)))))
+             (lambda (hits ok)
+               (let* ((hits (and (listp hits) hits))
+                      (scored (mapcar
+                               (lambda (hit)
+                                 (cons (+ (if (plist-get hit :syncedLyrics) 0 5)
+                                          (if (and duration (numberp (plist-get hit :duration)))
+                                              (min 30 (abs (- duration (plist-get hit :duration))))
+                                            10))
+                                       hit))
+                               (seq-filter (lambda (hit)
+                                             (and (my/music--lyrics-from hit "lrclib")
+                                                  (my/music--lrclib-match-p
+                                                   hit (emms-track-get track 'info-artist) title duration)))
+                                           hits)))
+                      (best (cdar (sort scored (lambda (a b) (< (car a) (car b)))))))
+                 (funcall callback (and best (my/music--lyrics-from best "lrclib")) ok)))))))
+    (if (string-empty-p artist)
+        (funcall search)
+      (my/music--fetch-json
+       (concat "https://lrclib.net/api/get?artist_name=" (url-hexify-string artist)
+               "&track_name=" (url-hexify-string title)
+               (if duration (format "&duration=%d" duration) ""))
+       (lambda (hit _ok)
+         (let ((result (and (plist-get hit :id) (my/music--lyrics-from hit "lrclib"))))
+           (if result (funcall callback result t) (funcall search))))))))
+
+(defun my/music--store-lyrics (track lyrics &optional callback)
+  "Write LYRICS (a plist with text) into TRACK's file, in the background."
+  (if (or (my/music--url-p track) (not (my/music--lyrics-text-p lyrics)))
+      (when callback (funcall callback nil))
+    (my/music--write-tags (emms-track-name track)
+                          (list (cons 'lyrics (my/music--lyrics-text lyrics)))
+                          (or callback #'ignore))))
+
+(defun my/music--lyrics-text-p (lyrics)
+  (and (consp lyrics) (or (plist-get lyrics :synced) (plist-get lyrics :plain))))
+
+(defun my/music--lyrics (track)
+  "TRACK's lyrics plist, `pending' while fetching (starts the fetch).
+Looks in the song's own file first, then online (and saves what it finds
+into the file, see `my/music-lyrics-store')."
+  (let* ((name (emms-track-name track))
+         (have (gethash name my/music--lyrics))
+         (cache (my/music--lyrics-file name)))
+    (cond
+     (have have)
+     ((when-let ((tagged (my/music--tag-lyrics track)))
+        (puthash name tagged my/music--lyrics)))
+     ((file-exists-p cache)
+      (puthash name (with-temp-buffer (insert-file-contents cache) (read (current-buffer)))
+               my/music--lyrics))
+     (t
+      (puthash name 'pending my/music--lyrics)
+      (my/music--lrclib-lookup
+       track
+       (lambda (result ok)
+         (when (and result my/music-lyrics-store)
+           (my/music--store-lyrics track result))
+         (my/music--lyrics-done
+          name (or result (list :source "lrclib" :none t :offline (not ok))))))
+      'pending))))
+
+(defun my/music-lyrics--render ()
+  "Redraw the lyrics panel for whatever is playing."
+  (when-let ((buf (get-buffer my/music-lyrics-buffer)))
+    (with-current-buffer buf
+      (let* ((inhibit-read-only t)
+             (track (and emms-player-playing-p (emms-playlist-current-selected-track)))
+             (lyrics (and track (my/music--lyrics track)))
+             (same (equal track my/music-lyrics--track)))
+        (setq my/music-lyrics--track track
+              my/music-lyrics--line nil
+              my/music-lyrics--snap t)
+        (erase-buffer)
+        (insert "\n")
+        (if (not track)
+            (insert (propertize "Nothing playing" 'face '(:weight bold :height 1.2)) "\n")
+          (insert (propertize (my/music--title track) 'face '(:weight bold :height 1.2)) "\n"
+                  (propertize (or (emms-track-get track 'info-artist) "") 'face 'shadow) "\n\n")
+          (pcase lyrics
+            ('pending (insert (propertize "looking for lyrics…" 'face 'shadow)))
+            ((guard (plist-get lyrics :instrumental))
+             (insert (propertize "♪ instrumental" 'face 'shadow)))
+            ((guard (plist-get lyrics :none))
+             (insert (propertize (if (plist-get lyrics :offline)
+                                     "couldn't reach lrclib — r to try again"
+                                   "no lyrics found — r to look again")
+                                 'face 'shadow)))
+            ((guard (plist-get lyrics :synced))
+             (let ((i 0))
+               (dolist (line (plist-get lyrics :synced))
+                 (insert (propertize (concat (if (string-empty-p (cdr line)) "♪" (cdr line)) "\n")
+                                     'face 'shadow 'my/lyric i 'my/lyric-time (car line)))
+                 (cl-incf i))))
+            (_ (insert (plist-get lyrics :plain) "\n")))
+          (insert "\n" (propertize (format "lyrics from %s%s"
+                                           (if (consp lyrics) (plist-get lyrics :source) "lrclib")
+                                           (if (plist-get (and (consp lyrics) lyrics) :synced) " · synced" ""))
+                                   'face '(:inherit shadow :height 0.85))
+                  "\n"))
+        (unless same
+          (goto-char (point-min))
+          (dolist (w (get-buffer-window-list buf nil t))
+            (set-window-point w (point-min))
+            (set-window-start w (point-min))))
+        (my/music-lyrics--follow)))))
+
+(defun my/music-lyrics--highlight (seconds)
+  "Light up the synced line for SECONDS into the song."
+  (when-let ((buf (get-buffer my/music-lyrics-buffer)))
+    (with-current-buffer buf
+      (let ((pos (point-min)) found)
+        ;; last line whose time has come (a little early reads better)
+        (while (setq pos (next-single-property-change pos 'my/lyric-time))
+          (let ((time (get-text-property pos 'my/lyric-time)))
+            (when (and time (<= time (+ seconds 0.3)))
+              (setq found pos))))
+        (unless (equal found my/music-lyrics--line)
+          (unless my/music-lyrics--overlay
+            (setq my/music-lyrics--overlay (make-overlay 1 1)))
+          (if (not found)
+              (progn (delete-overlay my/music-lyrics--overlay)
+                     (setq my/music-lyrics--line nil))
+            (move-overlay my/music-lyrics--overlay found
+                          (next-single-property-change found 'my/lyric (current-buffer) (point-max)))
+            (overlay-put my/music-lyrics--overlay 'face
+                         `(:foreground ,(my/music--color 'default :foreground "#dfe1e5")
+                           :weight bold))
+            ;; keep it in view, unless you've moved around the panel yourself
+            (let ((old my/music-lyrics--line))
+              (dolist (w (get-buffer-window-list buf nil t))
+                (when (or my/music-lyrics--snap
+                          (not (eq w (selected-window)))
+                          (eql (window-point w) old))
+                  (with-selected-window w
+                    (goto-char found)
+                    (recenter (/ (window-body-height) 3))))))
+            (setq my/music-lyrics--line found
+                  my/music-lyrics--snap nil)))))))
+
+(defun my/music-lyrics--editing-p ()
+  "Non-nil when a lyrics editor is on screen."
+  (seq-some (lambda (buf) (and (eq (buffer-local-value 'major-mode buf) 'my/music-lyrics-edit-mode)
+                               (get-buffer-window buf t)))
+            (buffer-list)))
+
+(defun my/music-lyrics--follow ()
+  "Ask the player where it is and move the highlights (panel and editor) there."
+  (let* ((buf (get-buffer my/music-lyrics-buffer))
+         (panel (and buf (get-buffer-window buf t)))
+         (editing (my/music-lyrics--editing-p)))
+    (if (not (or panel editing))
+        (when my/music-lyrics--timer
+          (cancel-timer my/music-lyrics--timer)
+          (setq my/music-lyrics--timer nil))
+      (when emms-player-playing-p
+        (let ((update (lambda (seconds)
+                        (when (and panel (with-current-buffer buf
+                                           (text-property-any (point-min) (point-max) 'my/lyric 0)))
+                          (my/music-lyrics--highlight seconds))
+                        (when editing (my/music-lyrics-edit--highlight seconds)))))
+          (if (and (fboundp 'emms-player-mpv-cmd) (eq (emms-player-get emms-player-playing-p 'start)
+                                                      (emms-player-get emms-player-mpv 'start)))
+              (emms-player-mpv-cmd '(get_property time-pos)
+                                   (lambda (data &rest _) (when (numberp data) (funcall update data))))
+            (funcall update (if (boundp 'emms-playing-time) emms-playing-time 0))))))))
+
+(defun my/music-lyrics--start-timer ()
+  (unless my/music-lyrics--timer
+    (setq my/music-lyrics--timer (run-at-time 0.4 0.4 #'my/music-lyrics--follow))))
+
+(define-derived-mode my/music-lyrics-mode special-mode "Lyrics"
+  "Lyrics for the playing track."
+  (setq-local left-margin-width 2
+              right-margin-width 1)
+  (visual-line-mode 1))
+
+(defvar my/music-lyrics-popped nil
+  "Non-nil when lyrics live in their own frame rather than the side panel.")
+
+(defun my/music-lyrics--frame ()
+  "The popped-out lyrics frame, if there is one."
+  (seq-find (lambda (f) (frame-parameter f 'my/music-lyrics)) (frame-list)))
+
+(defun my/music-lyrics--buffer ()
+  (let ((buf (get-buffer-create my/music-lyrics-buffer)))
+    (with-current-buffer buf
+      (unless (derived-mode-p 'my/music-lyrics-mode) (my/music-lyrics-mode)))
+    buf))
+
+(defun my/music-lyrics--start ()
+  (my/music-lyrics--render)
+  (my/music-page-refresh)
+  (my/music-lyrics--start-timer))
+
+(defun my/music-lyrics--dock ()
+  "Show lyrics as a side panel in the selected frame."
+  (display-buffer-in-side-window
+   (my/music-lyrics--buffer)
+   `((side . right) (slot . 0) (window-width . ,my/music-lyrics-width)
+     (preserve-size . (t . nil))
+     (window-parameters . ((no-delete-other-windows . t)))))
+  (my/music-lyrics--start))
+
+(defun my/music-lyrics--pop ()
+  "Show lyrics in a frame of their own, which you can put anywhere."
+  (let ((frame (make-frame `((name . "Lyrics") (my/music-lyrics . t)
+                             (width . 56) (height . 34)
+                             (tab-bar-lines . 0) (unsplittable . t)))))
+    (with-selected-frame frame
+      (switch-to-buffer (my/music-lyrics--buffer))
+      (set-window-dedicated-p (selected-window) t))
+    (select-frame-set-input-focus frame))
+  (my/music-lyrics--start))
+
+(defun my/music-lyrics--hide ()
+  "Close the lyrics, wherever they are."
+  (when-let ((frame (my/music-lyrics--frame)))
+    (delete-frame frame))
+  (when-let ((buf (get-buffer my/music-lyrics-buffer)))
+    (dolist (w (get-buffer-window-list buf nil t))
+      (ignore-errors (delete-window w))))
+  (my/music-page-refresh))
+
+(defun my/music-lyrics--shown-p ()
+  (when-let ((buf (get-buffer my/music-lyrics-buffer)))
+    (get-buffer-window-list buf nil t)))
+
+(defun my/music-lyrics ()
+  "Show or hide the lyrics (docked or popped out, whichever you used last)."
+  (interactive)
+  (cond ((my/music-lyrics--shown-p) (my/music-lyrics--hide))
+        (my/music-lyrics-popped (my/music-lyrics--pop))
+        (t (my/music-lyrics--dock))))
+
+(defun my/music-lyrics-pop-toggle ()
+  "Pop the lyrics out into their own frame, or dock them back."
+  (interactive)
+  (let ((popped (my/music-lyrics--frame)))
+    (my/music-lyrics--hide)
+    (setq my/music-lyrics-popped (not popped))
+    (if popped
+        ;; back beside the music page, in the main frame
+        (let ((main (seq-find (lambda (f) (and (frame-visible-p f)
+                                               (not (frame-parameter f 'my/music-lyrics))))
+                              (frame-list))))
+          (when main (select-frame-set-input-focus main))
+          (my/music-lyrics--dock))
+      (my/music-lyrics--pop))))
+
+(defun my/music-lyrics-pin ()
+  "Keep the popped-out lyrics above other windows (or stop doing so)."
+  (interactive)
+  (let ((frame (or (my/music-lyrics--frame)
+                   (user-error "Pop the lyrics out first (P)"))))
+    (set-frame-parameter frame 'z-group
+                         (unless (eq (frame-parameter frame 'z-group) 'above) 'above))
+    (message (if (eq (frame-parameter frame 'z-group) 'above)
+                 "Lyrics pinned on top"
+               "Lyrics unpinned"))))
+
+(defun my/music-lyrics-preference (choice)
+  "Set what happens when a song's own lyrics and lrclib's differ."
+  (interactive
+   (list (intern (completing-read "When a song has lyrics and lrclib has others too: "
+                                  '("ask" "local" "online") nil t))))
+  (setq my/music-lyrics-prefer choice)
+  (my/music--save-state)
+  (message "Lyrics: %s" (pcase choice ('ask "will ask each time")
+                          ('local "always keep the song's own")
+                          ('online "always take lrclib's"))))
+
+(defun my/music--lyrics-keep-which ()
+  "Ask whether to keep the song's own lyrics or lrclib's; returns local or online."
+  (pcase my/music-lyrics-prefer
+    ('local 'local)
+    ('online 'online)
+    (_ (pcase (car (read-multiple-choice
+                    "This song already has lyrics (lrclib's are showing now)"
+                    '((?l "keep local" "keep the lyrics saved in the song")
+                      (?o "use online" "save lrclib's into the song instead")
+                      (?L "always local" "always keep the song's own, don't ask again")
+                      (?O "always online" "always take lrclib's, don't ask again"))))
+         (?l 'local)
+         (?o 'online)
+         (?L (my/music-lyrics-preference 'local) 'local)
+         (?O (my/music-lyrics-preference 'online) 'online)))))
+
+(defun my/music-lyrics-refetch ()
+  "Look this song up on lrclib again.
+If the song already has lyrics of its own, lrclib's are shown and you
+choose which to keep (see `my/music-lyrics-prefer')."
+  (interactive)
+  (let* ((track (or my/music-lyrics--track
+                    (and emms-player-playing-p (emms-playlist-current-selected-track))
+                    (user-error "Nothing playing")))
+         (name (emms-track-name track))
+         (local (my/music--tag-lyrics track)))
+    (when (and local (eq my/music-lyrics-prefer 'local))
+      (user-error "Keeping the song's own lyrics (M-x my/music-lyrics-preference to change)"))
+    (ignore-errors (delete-file (my/music--lyrics-file name)))
+    (puthash name 'pending my/music--lyrics)
+    (my/music-lyrics--render)
+    (my/music--lrclib-lookup
+     track
+     (lambda (result ok)
+       (remhash name my/music--lyrics)
+       (cond
+        ((not result)
+         (when local (puthash name local my/music--lyrics))
+         (message (if ok "lrclib has nothing for this song" "Couldn't reach lrclib")))
+        ((and local (equal (my/music--lyrics-text local) (my/music--lyrics-text result)))
+         (puthash name local my/music--lyrics)
+         (message "lrclib has the same lyrics the song already has"))
+        (t
+         ;; show lrclib's while you decide
+         (puthash name result my/music--lyrics)
+         (my/music-lyrics--render)
+         (if (and local (eq (my/music--lyrics-keep-which) 'local))
+             (progn (puthash name local my/music--lyrics)
+                    (message "Kept the song's own lyrics"))
+           (my/music--store-lyrics track result)
+           (message "Lyrics from lrclib%s"
+                    (if (my/music--url-p track) "" ", saved into the song")))))
+       (my/music-lyrics--render)))))
+
+;; lyrics for the whole library, one song at a time
+
+(defvar my/music--lyrics-batch nil "Songs still to look up.")
+(defvar my/music--lyrics-batch-stats nil "(checked found total).")
+
+(defun my/music-lyrics-fetch-all ()
+  "Download lyrics into every song in the library that has none.
+Run it again to stop."
+  (interactive)
+  (if my/music--lyrics-batch
+      (when (y-or-n-p "Stop downloading lyrics? ")
+        (setq my/music--lyrics-batch nil)
+        (message "Stopped downloading lyrics"))
+    (my/music--ensure-library)
+    (let ((tracks (seq-filter (lambda (track) (string-match-p "\\.mp3\\'" (emms-track-name track)))
+                              (my/music--library-tracks))))
+      (setq my/music--lyrics-batch tracks
+            my/music--lyrics-batch-stats (list 0 0 (length tracks)))
+      (message "Downloading lyrics for %d songs in the background (SPC m Y again to stop)"
+               (length tracks))
+      (my/music--lyrics-batch-next))))
+
+(defun my/music--lyrics-batch-next ()
+  (pcase-let ((`(,checked ,found ,total) my/music--lyrics-batch-stats))
+    (if (null my/music--lyrics-batch)
+        (when (= checked total)
+          (setq my/music--lyrics-batch-stats nil)
+          (message "Lyrics: done, found %d for songs that had none" found))
+      (let* ((track (pop my/music--lyrics-batch))
+             (name (emms-track-name track))
+             (next (lambda ()
+                     (setf (nth 0 my/music--lyrics-batch-stats) (1+ checked))
+                     (when (zerop (% (1+ checked) 10))
+                       (let ((message-log-max nil))
+                         (message "Lyrics: %d/%d songs checked, %d found"
+                                  (1+ checked) total (nth 1 my/music--lyrics-batch-stats))))
+                     (run-at-time 0.1 nil #'my/music--lyrics-batch-next))))
+        (if (or (my/music--tag-lyrics track) (file-exists-p (my/music--lyrics-file name)))
+            (funcall next)
+          (my/music--lrclib-lookup
+           track
+           (lambda (result ok)
+             (cond (result
+                    (cl-incf (nth 1 my/music--lyrics-batch-stats))
+                    (puthash name result my/music--lyrics)
+                    (my/music--store-lyrics track result (lambda (_) (funcall next))))
+                   (t
+                    ;; remember there's nothing, so playing it later doesn't ask again
+                    (when ok (my/music--lyrics-done name (list :source "lrclib" :none t)))
+                    (funcall next))))))))))
+
+(defun my/music-lyrics-seek ()
+  "Jump the song to the lyric line at point."
+  (interactive)
+  (let ((time (get-text-property (point) 'my/lyric-time)))
+    (unless time (user-error "This line has no time"))
+    (setq my/music-lyrics--snap t)
+    (emms-seek-to time)))
+
+(defun my/music-lyrics--track-changed (&rest _)
+  (when (get-buffer my/music-lyrics-buffer)
+    (my/music-lyrics--render)))
+
+(defun my/music-lyrics-bigger ()
+  "Make the lyrics text bigger."
+  (interactive)
+  (text-scale-increase 1))
+
+(defun my/music-lyrics-smaller ()
+  "Make the lyrics text smaller."
+  (interactive)
+  (text-scale-decrease 1))
+
+(defun my/music-lyrics-reset-size ()
+  "Put the lyrics text back to its normal size."
+  (interactive)
+  (text-scale-set 0))
+
+;;; editing tags and lyrics
+;; ---------------------------------------------------------------------
+;; tags are written with python's mutagen (ffmpeg would turn lyrics into a
+;; nonstandard TXXX frame and mangle comments). lyrics go in the standard
+;; USLT frame, as LRC text when they're synced, so other players see them
+
+(defconst my/music--tag-script "
+import sys, json
+from mutagen.id3 import ID3, ID3NoHeaderError, TIT2, TPE1, TALB, TDRC, TCON, TRCK, USLT, APIC
+req = json.load(sys.stdin)
+path = req['file']
+target = path
+if req.get('safe'):
+    # the song is playing: write a copy and swap it in, so the player
+    # (which keeps the old file open) never sees it change underneath
+    import shutil
+    target = path + '.limacs-tmp'
+    shutil.copyfile(path, target)
+try:
+    tags = ID3(path)
+except ID3NoHeaderError:
+    tags = ID3()
+frames = {'title': TIT2, 'artist': TPE1, 'album': TALB, 'year': TDRC,
+          'genre': TCON, 'track': TRCK}
+for key, cls in frames.items():
+    if key in req:
+        tags.delall(cls.__name__)
+        if req[key]:
+            tags.add(cls(encoding=3, text=[req[key]]))
+if 'lyrics' in req:
+    for key in ('USLT', 'TXXX:USLT', 'TXXX:lyrics', 'TXXX:LYRICS'):
+        tags.delall(key)
+    if req['lyrics']:
+        tags.add(USLT(encoding=3, lang='eng', desc='', text=req['lyrics']))
+if req.get('cover'):
+    src = req['cover']
+    if src.startswith('http'):
+        import urllib.request
+        r = urllib.request.Request(src, headers={'User-Agent': 'limacs-music'})
+        data = urllib.request.urlopen(r, timeout=20).read()
+    else:
+        data = open(src, 'rb').read()
+    mime = 'image/png' if data[:8] == b'\\x89PNG\\r\\n\\x1a\\n' else 'image/jpeg'
+    tags.delall('APIC')
+    tags.add(APIC(encoding=3, mime=mime, type=3, desc='Cover', data=data))
+try:
+    tags.save(target, v2_version=3)
+    if target != path:
+        import os
+        os.replace(target, path)
+except BaseException:
+    if target != path:
+        import os
+        os.path.exists(target) and os.remove(target)
+    raise
+"
+  "Writes the tags given as JSON on stdin into an mp3 (see `my/music--write-tags').")
+
+(defun my/music--write-tags (file fields &optional callback)
+  "Write FIELDS (an alist like ((title . \"x\") (lyrics . \"…\"))) into FILE.
+A field set to \"\" removes that tag; fields left out are kept.  With
+CALLBACK, write in the background and call it with nil when done, or
+with the error text."
+  (let* ((playing (and emms-player-playing-p
+                       (equal file (emms-track-name (emms-playlist-current-selected-track)))))
+         (json (json-encode (append (list (cons 'file file)
+                                          (cons 'safe (if playing t :json-false)))
+                                    fields))))
+    (if callback
+        (let* ((buf (generate-new-buffer " *music-tags*"))
+               (proc (make-process
+                      :name "music-tags" :buffer buf :noquery t :connection-type 'pipe
+                      :command (list "python3" "-I" "-c" my/music--tag-script)
+                      :sentinel (lambda (proc _)
+                                  (unless (process-live-p proc)
+                                    (let ((err (unless (zerop (process-exit-status proc))
+                                                 (with-current-buffer buf (string-trim (buffer-string))))))
+                                      (kill-buffer buf)
+                                      (when err (message "Couldn't save tags to %s: %s"
+                                                         (file-name-nondirectory file)
+                                                         (car (last (split-string err "\n" t)))))
+                                      (funcall callback err)))))))
+          (process-send-string proc (encode-coding-string json 'utf-8))
+          (process-send-eof proc))
+      (with-temp-buffer
+        (insert json)
+        (let* ((coding-system-for-write 'utf-8)
+               (status (call-process-region (point-min) (point-max) "python3" t t nil
+                                            "-I" "-c" my/music--tag-script)))
+          (unless (eql status 0)
+            (error "Couldn't write tags: %s"
+                   (car (last (split-string (buffer-string) "\n" t))))))))))
+
+(defun my/music--read-tags (file)
+  "FILE's tags as an alist of lowercase symbol -> string (ffprobe's view)."
+  (with-temp-buffer
+    (when (zerop (call-process "ffprobe" nil t nil "-v" "quiet" "-show_entries"
+                               "format_tags" "-of" "json" file))
+      (goto-char (point-min))
+      (let ((json (ignore-errors (json-parse-buffer :object-type 'alist))))
+        (mapcar (lambda (kv) (cons (intern (downcase (symbol-name (car kv)))) (cdr kv)))
+                (alist-get 'tags (alist-get 'format json)))))))
+
+(defun my/music--track-at-point ()
+  "Track on the row at point (queue or library), else the one playing."
+  (or (pcase (get-text-property (point) 'my/music-item)
+        (`(queue ,_ ,track) track))
+      (and (derived-mode-p 'my/music-library-mode)
+           (tabulated-list-get-id)
+           (my/music-lib--track-of (tabulated-list-get-id)))
+      (and (derived-mode-p 'my/music-lyrics-mode 'my/music-lyrics-edit-mode)
+           (or my/music-lyrics--track my/music-lyrics-edit--track))
+      (and emms-player-playing-p (emms-playlist-current-selected-track))
+      (user-error "No track here, and nothing is playing")))
+
+;; the tag form
+
+(defvar my/music-tag-fields
+  '(("Title" . title) ("Artist" . artist) ("Album" . album)
+    ("Year" . date) ("Genre" . genre) ("Track" . track))
+  "Labels on the tag form and the ffprobe tag each one starts from.")
+
+(defvar-local my/music-tags--track nil "Track the tag form edits.")
+
+(define-derived-mode my/music-tags-mode text-mode "Tags"
+  "Form for editing a track's tags."
+  (setq-local header-line-format
+              (propertize "  ZZ save   ZQ cancel   ,c pick a cover image (or drop one here)   (clear a field to remove it)"
+                          'face 'shadow))
+  (setq-local dnd-protocol-alist
+              (append '(("^file:" . my/music-tags--drop) ("^https?://" . my/music-tags--drop))
+                      dnd-protocol-alist)))
+
+(defun my/music-edit-tags (&optional track)
+  "Edit the tags of TRACK (the row at point, or what's playing)."
+  (interactive)
+  (let* ((track (or track (my/music--track-at-point)))
+         (file (emms-track-name track)))
+    (when (my/music--url-p track)
+      (user-error "That's a link, not a file (D downloads it first)"))
+    (unless (string-match-p "\\.mp3\\'" file)
+      (user-error "Only mp3s can be edited"))
+    (let ((tags (my/music--read-tags file))
+          (buf (get-buffer-create "*Track Info*")))
+      (with-current-buffer buf
+        (let ((inhibit-read-only t))
+          (erase-buffer)
+          (my/music-tags-mode)
+          (setq my/music-tags--track track)
+          (insert (propertize (concat "\n  " (file-name-nondirectory file) "\n\n")
+                              'face 'shadow 'read-only t 'rear-nonsticky t))
+          (dolist (field my/music-tag-fields)
+            (insert (propertize (format "  %-8s" (concat (car field) ":"))
+                                'face 'font-lock-keyword-face 'read-only t
+                                'front-sticky t 'rear-nonsticky t)
+                    (or (alist-get (cdr field) tags)
+                        (and (eq (cdr field) 'date) (alist-get 'year tags))
+                        "")
+                    "\n"))
+          (insert (propertize (format "  %-8s" "Cover:")
+                              'face 'font-lock-keyword-face 'read-only t
+                              'front-sticky t 'rear-nonsticky t)
+                  "\n"
+                  (propertize "\n  cover: a file path or an image link, empty keeps the current one\n"
+                              'face 'shadow 'read-only t 'rear-nonsticky t))
+          (goto-char (point-min))
+          (search-forward "Title:")
+          (skip-chars-forward " ")
+          (set-buffer-modified-p nil)))
+      (pop-to-buffer buf '((display-buffer-below-selected) (window-height . 14))))))
+
+(defun my/music-tags--value (label)
+  (save-excursion
+    (goto-char (point-min))
+    (when (re-search-forward (concat "^  " label ":[ \t]*\\(.*\\)$") nil t)
+      (string-trim (match-string-no-properties 1)))))
+
+(defun my/music-tags--set-cover (source)
+  (save-excursion
+    (goto-char (point-min))
+    (re-search-forward "^  Cover:[ \t]*")
+    (let ((inhibit-read-only t))
+      (delete-region (point) (line-end-position))
+      (insert source))))
+
+(defun my/music-tags-pick-cover ()
+  "Fill the cover field from a file."
+  (interactive)
+  (my/music-tags--set-cover (expand-file-name (read-file-name "Cover image: " nil nil t))))
+
+(defun my/music--dropped (url)
+  "A dropped URL as a local path (for file: URLs) or the link itself."
+  (if (string-prefix-p "file:" url) (dnd-get-local-file-name url t) url))
+
+(defun my/music-tags--drop (url _action)
+  "An image dropped on the tag form becomes the cover."
+  (when-let ((source (my/music--dropped url)))
+    (my/music-tags--set-cover source)
+    (message "Cover set to %s (ZZ to save)" (file-name-nondirectory source)))
+  'private)
+
+(defun my/music-page--drop (url _action)
+  "An image dropped on the music page becomes the cover of the track at point."
+  (let* ((source (my/music--dropped url))
+         (track (ignore-errors (my/music--track-at-point))))
+    (cond ((not track) (message "Play something (or drop onto a queue row) to give it a cover"))
+          ((my/music--url-p track) (message "That track is a link: download it first (D) to give it a cover"))
+          ((y-or-n-p (format "Use %s as the cover of %s? "
+                             (file-name-nondirectory source) (my/music--title track)))
+           (let ((file (emms-track-name track)))
+             (my/music--write-tags file (list (cons 'cover (my/music--cover-image source))))
+             (my/music--forget-cover file)
+             (my/music-page-refresh)
+             (message "New cover for %s" (my/music--title track))))))
+  'private)
+
+(defun my/music--forget-cover (file)
+  "Drop the cached cover of FILE so the page pulls the new one."
+  (let ((cached (expand-file-name (concat (md5 file) ".jpg")
+                                  (expand-file-name "covers/" my/music-state-directory))))
+    (remhash cached my/music--cover-data)
+    (ignore-errors (delete-file cached))
+    (ignore-errors (delete-file (concat cached ".none")))))
+
+(defun my/music--cover-image (source)
+  "A local jpeg or png made from SOURCE (a file or a link), for embedding.
+Links are downloaded, and other formats (webp, gif, …) converted to jpeg."
+  (let* ((dir (make-temp-file "music-cover" t))
+         (local (if (string-match-p "\\`https?://" source)
+                    (let ((out (expand-file-name "download" dir)))
+                      (unless (zerop (call-process "curl" nil nil nil "-sfL" "-m" "20"
+                                                   "-A" my/music-lyrics-agent "-o" out source))
+                        (user-error "Couldn't download %s" source))
+                      out)
+                  (expand-file-name source)))
+         (magic (with-temp-buffer
+                  (set-buffer-multibyte nil)
+                  (insert-file-contents-literally local nil 0 8)
+                  (buffer-string))))
+    (unless (file-readable-p local) (user-error "Can't read %s" source))
+    (if (or (string-prefix-p "\xff\xd8" magic) (string-prefix-p "\x89PNG" magic))
+        local
+      (let ((out (expand-file-name "cover.jpg" dir)))
+        (unless (zerop (call-process "ffmpeg" nil nil nil "-v" "quiet" "-y" "-i" local
+                                     "-frames:v" "1" "-q:v" "2" out))
+          (user-error "That isn't an image"))
+        out))))
+
+(defun my/music-tags-save ()
+  "Write the form back into the file."
+  (interactive)
+  (let* ((track my/music-tags--track)
+         (file (emms-track-name track))
+         (fields (mapcar (lambda (field)
+                           (cons (if (eq (cdr field) 'date) 'year (cdr field))
+                                 (or (my/music-tags--value (car field)) "")))
+                         my/music-tag-fields))
+         (cover (my/music-tags--value "Cover")))
+    (when (and cover (not (string-empty-p cover)))
+      (push (cons 'cover (my/music--cover-image cover)) fields))
+    (my/music--write-tags file fields)
+    ;; refresh what emms knows about it
+    (dolist (field '((title . info-title) (artist . info-artist)
+                     (album . info-album) (year . info-year)))
+      (let ((value (alist-get (car field) fields)))
+        (emms-track-set track (cdr field) (unless (string-empty-p value) value))))
+    (when (boundp 'emms-cache-db)
+      (puthash file track emms-cache-db)
+      (setq emms-cache-dirty t))
+    (when (alist-get 'cover fields)
+      (my/music--forget-cover file))
+    (set-buffer-modified-p nil)
+    (quit-window t)
+    (my/music-page-refresh)
+    (my/music-lyrics--track-changed)
+    (message "Saved tags for %s" (file-name-nondirectory file))))
+
+(defun my/music-tags-cancel ()
+  "Close the form without saving."
+  (interactive)
+  (set-buffer-modified-p nil)
+  (quit-window t))
+
+;; the lyrics editor: type or paste lyrics, then play the song and press
+;; RET as each line starts to stamp it
+
+(defvar-local my/music-lyrics-edit--track nil "Track whose lyrics are being edited.")
+(defvar-local my/music-lyrics-edit--overlay nil)
+
+(defconst my/music--stamp-re "^\\[\\([0-9]+\\):\\([0-9.]+\\)\\][ \t]*"
+  "An LRC time stamp at the start of a line.")
+
+(define-derived-mode my/music-lyrics-edit-mode text-mode "Lyrics Edit"
+  "Edit and time-stamp lyrics."
+  (setq-local header-line-format
+              (propertize "  RET stamp & next   ,0 play from start   ,j play this line   ,- ,= nudge   ,u unstamp   ,p pause   ZZ save   ZQ cancel"
+                          'face 'shadow))
+  (setq-local left-margin-width 1))
+
+(defun my/music--stamp (seconds)
+  (format "[%02d:%05.2f] " (floor seconds 60) (- seconds (* 60 (floor seconds 60)))))
+
+(defun my/music--lyrics-text (lyrics)
+  "LYRICS (a plist) as editable text: LRC when synced, plain otherwise."
+  (cond ((plist-get lyrics :synced)
+         (mapconcat (lambda (line) (concat (my/music--stamp (car line)) (cdr line)))
+                    (plist-get lyrics :synced) "\n"))
+        ((plist-get lyrics :plain))
+        (t "")))
+
+(defun my/music-edit-lyrics (&optional track)
+  "Edit (and time-stamp) the lyrics of TRACK (row at point, or what's playing)."
+  (interactive)
+  (let* ((track (or track (my/music--track-at-point)))
+         (have (gethash (emms-track-name track) my/music--lyrics))
+         (buf (get-buffer-create (format "*Lyrics Edit: %s*" (my/music--title track)))))
+    (with-current-buffer buf
+      (unless (derived-mode-p 'my/music-lyrics-edit-mode)
+        (my/music-lyrics-edit-mode)
+        (setq my/music-lyrics-edit--track track)
+        (insert (if (consp have) (my/music--lyrics-text have) ""))
+        (goto-char (point-min))
+        (set-buffer-modified-p nil)))
+    (pop-to-buffer buf)
+    (my/music-lyrics--start-timer)
+    (when (= (buffer-size buf) 0)
+      (message "Paste or type the lyrics, one line each, then ,0 and RET along with the song"))))
+
+(defun my/music-lyrics-edit--playing-p ()
+  "Non-nil when the song being edited is the one playing."
+  (and emms-player-playing-p
+       (equal (emms-track-name (emms-playlist-current-selected-track))
+              (emms-track-name my/music-lyrics-edit--track))))
+
+(defun my/music-lyrics-edit--position (callback)
+  "Call CALLBACK with how far into the song the player is, in seconds."
+  (if (and (fboundp 'emms-player-mpv-cmd)
+           (eq (emms-player-get emms-player-playing-p 'start)
+               (emms-player-get emms-player-mpv 'start)))
+      (emms-player-mpv-cmd '(get_property time-pos)
+                           (lambda (data &rest _) (when (numberp data) (funcall callback data))))
+    (funcall callback (if (boundp 'emms-playing-time) emms-playing-time 0))))
+
+(defun my/music-lyrics-edit--set-stamp (pos seconds)
+  "Put a SECONDS stamp on the line at POS (replacing any it had)."
+  (save-excursion
+    (goto-char pos)
+    (beginning-of-line)
+    (when (looking-at my/music--stamp-re)
+      (delete-region (match-beginning 0) (match-end 0)))
+    (insert (my/music--stamp (max 0 seconds)))))
+
+(defun my/music-lyrics-edit--line-time ()
+  "The stamp on the line at point, in seconds, or nil."
+  (save-excursion
+    (beginning-of-line)
+    (when (looking-at my/music--stamp-re)
+      (+ (* 60 (string-to-number (match-string 1)))
+         (string-to-number (match-string 2))))))
+
+(defun my/music-lyrics-edit-tap ()
+  "Stamp the line at point with the song's current time, then go to the next line."
+  (interactive)
+  (unless (my/music-lyrics-edit--playing-p)
+    (user-error "Play this song first (,0 plays it from the start)"))
+  (let ((marker (copy-marker (line-beginning-position)))
+        (buf (current-buffer)))
+    (my/music-lyrics-edit--position
+     (lambda (seconds)
+       (when (buffer-live-p buf)
+         (with-current-buffer buf
+           (my/music-lyrics-edit--set-stamp marker seconds)))))
+    ;; move on straight away so quick taps land on the right lines
+    (forward-line 1)
+    (while (and (not (eobp)) (looking-at-p "^[ \t]*$"))
+      (forward-line 1))))
+
+(defun my/music-lyrics-edit-unstamp ()
+  "Remove the stamp from the line at point."
+  (interactive)
+  (save-excursion
+    (beginning-of-line)
+    (when (looking-at my/music--stamp-re)
+      (delete-region (match-beginning 0) (match-end 0)))))
+
+(defun my/music-lyrics-edit--nudge (delta)
+  (let ((time (or (my/music-lyrics-edit--line-time) (user-error "This line has no stamp"))))
+    (my/music-lyrics-edit--set-stamp (point) (+ time delta))
+    (message "%s" (string-trim (my/music--stamp (max 0 (+ time delta)))))))
+
+(defun my/music-lyrics-edit-earlier ()
+  "Move this line's stamp 0.1s earlier."
+  (interactive)
+  (my/music-lyrics-edit--nudge -0.1))
+
+(defun my/music-lyrics-edit-later ()
+  "Move this line's stamp 0.1s later."
+  (interactive)
+  (my/music-lyrics-edit--nudge 0.1))
+
+(defun my/music-lyrics-edit-play-start ()
+  "Play the song from the start and go to the first line."
+  (interactive)
+  (let ((track my/music-lyrics-edit--track))
+    (if (my/music-lyrics-edit--playing-p)
+        (emms-seek-to 0)
+      (my/music--append track t)))
+  (goto-char (point-min)))
+
+(defun my/music-lyrics-edit-play-line ()
+  "Play the song from a moment before this line's stamp, to check it."
+  (interactive)
+  (let ((time (or (my/music-lyrics-edit--line-time) (user-error "This line has no stamp"))))
+    (unless (my/music-lyrics-edit--playing-p)
+      (my/music--append my/music-lyrics-edit--track t))
+    (run-at-time (if (my/music-lyrics-edit--playing-p) 0 1) nil
+                 #'emms-seek-to (max 0 (- time 1)))))
+
+(defun my/music-lyrics-edit--highlight (seconds)
+  "Light up the line playing at SECONDS in any visible lyrics editor."
+  (dolist (buf (buffer-list))
+    (with-current-buffer buf
+      (when (and (derived-mode-p 'my/music-lyrics-edit-mode)
+                 (get-buffer-window buf t)
+                 (my/music-lyrics-edit--playing-p))
+        (let (found)
+          (save-excursion
+            (goto-char (point-min))
+            (while (re-search-forward my/music--stamp-re nil t)
+              (when (<= (+ (* 60 (string-to-number (match-string 1)))
+                           (string-to-number (match-string 2)))
+                        (+ seconds 0.3))
+                (setq found (line-beginning-position)))))
+          (unless my/music-lyrics-edit--overlay
+            (setq my/music-lyrics-edit--overlay (make-overlay 1 1))
+            (overlay-put my/music-lyrics-edit--overlay 'face 'hl-line)
+            (overlay-put my/music-lyrics-edit--overlay 'before-string
+                         (propertize " " 'display '(left-fringe right-triangle success))))
+          (if found
+              (move-overlay my/music-lyrics-edit--overlay found
+                            (save-excursion (goto-char found) (line-end-position)))
+            (delete-overlay my/music-lyrics-edit--overlay)))))))
+
+(defun my/music-lyrics-edit-save ()
+  "Save the lyrics into the song (and show them in the panel)."
+  (interactive)
+  (let* ((track my/music-lyrics-edit--track)
+         (name (emms-track-name track))
+         (text (string-trim (buffer-substring-no-properties (point-min) (point-max))))
+         (synced (my/music--parse-lrc text))
+         (lines (seq-remove #'string-blank-p (split-string text "\n")))
+         (missing (and synced (seq-count (lambda (l) (not (string-match-p my/music--stamp-re l)))
+                                         lines)))
+         (result (cond ((string-empty-p text) nil)
+                       (synced (list :source "you" :synced synced))
+                       (t (list :source "you" :plain text)))))
+    (when (and missing (> missing 0)
+               (not (y-or-n-p (format "%d line%s have no stamp and won't show when synced. Save anyway? "
+                                      missing (if (= missing 1) "" "s")))))
+      (user-error "Not saved"))
+    (unless (my/music--url-p track)
+      (my/music--write-tags name (list (cons 'lyrics text))))
+    (if result
+        (my/music--lyrics-done name result)
+      ;; cleared: forget them, and look online again
+      (remhash name my/music--lyrics)
+      (ignore-errors (delete-file (my/music--lyrics-file name)))
+      (my/music-lyrics--render))
+    (set-buffer-modified-p nil)
+    (quit-window t)
+    (message (if (my/music--url-p track)
+                 "Lyrics saved (in emacs only: links have no file to hold them)"
+               "Lyrics saved into the song"))))
+
+(defun my/music-lyrics-edit-cancel ()
+  "Close the lyrics editor without saving."
+  (interactive)
+  (when (or (not (buffer-modified-p)) (y-or-n-p "Throw away your lyrics changes? "))
+    (set-buffer-modified-p nil)
+    (quit-window t)))
 
 ;;; library view
 ;; ---------------------------------------------------------------------
@@ -1650,7 +2817,8 @@ note: tracks are lists themselves, so playlist rows are tagged with :row."
   (dolist (hook '(emms-player-started-hook emms-player-stopped-hook
                   emms-player-finished-hook emms-player-paused-hook
                   emms-playlist-selection-changed-hook))
-    (add-hook hook #'my/music-page-refresh))
+    (add-hook hook #'my/music-page-refresh)
+    (add-hook hook #'my/music-lyrics--track-changed))
   (add-hook 'emms-player-started-hook #'my/music--apply-volume)
   (unless my/music--timer
     (setq my/music--timer (run-at-time 1 1 #'my/music-page--tick))))
@@ -1700,6 +2868,9 @@ note: tracks are lists themselves, so playlist rows are tagged with :row."
     "b" #'my/music-browse
     "R" #'my/music-scan
     "?" #'my/music-help
+    "L" #'my/music-lyrics
+    "E" #'my/music-edit-lyrics
+    "T" #'my/music-edit-tags
     (kbd "g r") #'my/music-page-refresh
     "q" #'quit-window)
 
@@ -1731,7 +2902,45 @@ note: tracks are lists themselves, so playlist rows are tagged with :row."
     (kbd "<leader>m-") #'my/music-volume-down
     (kbd "<leader>mR") #'my/music-scan
     (kbd "<leader>ml") #'my/music-library
-    (kbd "<leader>mA") (my/music--vertico #'my/music-artist)))
+    (kbd "<leader>mA") (my/music--vertico #'my/music-artist)
+    (kbd "<leader>mL") #'my/music-lyrics
+    (kbd "<leader>me") #'my/music-edit-lyrics
+    (kbd "<leader>mt") #'my/music-edit-tags
+    (kbd "<leader>mY") #'my/music-lyrics-fetch-all)
+
+  (evil-set-initial-state 'my/music-lyrics-mode 'normal)
+  (evil-define-key 'normal my/music-lyrics-mode-map
+    (kbd "RET") #'my/music-lyrics-seek
+    "r" #'my/music-lyrics-refetch
+    "P" #'my/music-lyrics-pop-toggle
+    "t" #'my/music-lyrics-pin
+    "e" #'my/music-edit-lyrics
+    "T" #'my/music-edit-tags
+    "+" #'my/music-lyrics-bigger
+    "-" #'my/music-lyrics-smaller
+    "=" #'my/music-lyrics-reset-size
+    "L" #'my/music-lyrics
+    "q" #'my/music-lyrics)
+
+  (evil-define-key 'normal my/music-lyrics-edit-mode-map
+    (kbd "RET") #'my/music-lyrics-edit-tap
+    (kbd ",0") #'my/music-lyrics-edit-play-start
+    (kbd ",j") #'my/music-lyrics-edit-play-line
+    (kbd ",-") #'my/music-lyrics-edit-earlier
+    (kbd ",=") #'my/music-lyrics-edit-later
+    (kbd ",u") #'my/music-lyrics-edit-unstamp
+    (kbd ",p") #'my/music-toggle
+    (kbd ",s") #'my/music-lyrics-edit-save
+    (kbd ",q") #'my/music-lyrics-edit-cancel
+    "ZZ" #'my/music-lyrics-edit-save
+    "ZQ" #'my/music-lyrics-edit-cancel)
+
+  (evil-define-key 'normal my/music-tags-mode-map
+    (kbd ",c") #'my/music-tags-pick-cover
+    (kbd ",s") #'my/music-tags-save
+    (kbd ",q") #'my/music-tags-cancel
+    "ZZ" #'my/music-tags-save
+    "ZQ" #'my/music-tags-cancel))
 
   (evil-set-initial-state 'my/music-match-mode 'normal)
   (evil-define-key 'normal my/music-match-mode-map
@@ -1766,6 +2975,8 @@ note: tracks are lists themselves, so playlist rows are tagged with :row."
     "d" #'my/music-lib-remove
     "J" #'my/music-lib-move-down
     "K" #'my/music-lib-move-up
+    "E" #'my/music-edit-lyrics
+    "T" #'my/music-edit-tags
     (kbd "g r") #'my/music-lib--refresh
     "q" #'my/music-back-to-page)
 
