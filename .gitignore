@@ -25,3 +25,21 @@ themes/
 # music player state (library cache, playlists, volume)
 emms/
 music/
+
+# private mail account list (addresses, key fingerprints)
+mail-accounts.el
+
+# machine state, not config
+projects
+.emacs.custom.el
+history
+savehist
+bookmarks
+network-security.data
+.cache/
+var/
+eshell/
+server/
+*.log
+.org-id-locations
+session.*
