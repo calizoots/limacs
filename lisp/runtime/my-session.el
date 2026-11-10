@@ -294,9 +294,11 @@ SKIPPED-P tells whether a path's drive was skipped."
                   (user-error "No session called %s" name))))
     (let* ((skipped (my/drive-ensure-paths (my/session--needed-paths data)))
            (skipped-p (lambda (path) (memq (my/drive-for-path path) skipped)))
+           ;; tabs whose project is on a skipped drive (or gone) stay out
            (tabs (seq-remove (lambda (tab)
-                               (and (plist-get tab :project)
-                                    (funcall skipped-p (plist-get tab :project))))
+                               (let ((root (plist-get tab :project)))
+                                 (and root (or (funcall skipped-p root)
+                                               (not (file-directory-p root))))))
                              (plist-get data :tabs)))
            (current (min (or (plist-get data :current) 0) (max 0 (1- (length tabs)))))
            (tab-bar-new-tab-choice t))

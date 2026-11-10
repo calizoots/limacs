@@ -40,9 +40,11 @@
 ;; ---------------------------------------------------------------------
 
 (defun my/drive-for-path (path)
-  "The drive PATH lives on, or nil."
+  "The drive PATH lives on, or nil.
+Symlinks are followed (~/bine -> /media/veracrypt1/bine), which works
+while the drive is away too."
   (when path
-    (let ((path (file-name-as-directory (expand-file-name path))))
+    (let ((path (file-name-as-directory (file-truename (expand-file-name path)))))
       (seq-find (lambda (drive) (string-prefix-p (plist-get drive :mount) path))
                 my/drives))))
 
