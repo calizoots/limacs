@@ -69,7 +69,9 @@
 		sp-indent-quiet t
         lsp-eldoc-render-all nil
         lsp-signature-auto-activate nil
-        lsp-signature-function 'ignore))
+        lsp-signature-function 'ignore
+        ;; no breadcrumb bar above the code, ever
+        lsp-headerline-breadcrumb-enable nil))
 
 (use-package lsp-ivy
   :commands lsp-ivy-workspace-symbol)
