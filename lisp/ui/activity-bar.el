@@ -68,6 +68,31 @@
 (with-eval-after-load 'neotree
   (setq neo-display-action '(my/activity--sidebar-display)))
 
+(defun my/activity--sidebar-p (window)
+  "Non-nil if WINDOW is the tree or the Git view beside the bar."
+  (and (window-live-p window)
+       (or (window-parameter window 'my-activity-git)
+           (eq (buffer-local-value 'major-mode (window-buffer window)) 'neotree-mode))))
+
+(defun my/activity--editor-window ()
+  "The code window to use instead of the sidebar."
+  (or (let ((right (window-in-direction 'right (selected-window))))
+        (and right (not (window-parameter right 'window-side)) right))
+      (seq-find (lambda (w) (not (or (window-parameter w 'window-side)
+                                     (my/activity--sidebar-p w))))
+                (window-list nil 'nomini))))
+
+(defun my/activity--not-in-sidebar (fn &rest args)
+  "Run FN (`display-buffer') from the code area when the sidebar has focus,
+so nothing opens by splitting the tree."
+  (let ((editor (and (my/activity--sidebar-p (selected-window))
+                     (my/activity--editor-window))))
+    (if editor
+        (with-selected-window editor (apply fn args))
+      (apply fn args))))
+
+(advice-add 'display-buffer :around #'my/activity--not-in-sidebar)
+
 ;;; what each icon does
 ;; ---------------------------------------------------------------------
 
