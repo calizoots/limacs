@@ -46,3 +46,6 @@ session.*
 
 # saved sessions (tabs, file paths)
 sessions/
+
+# activity bar: which icons are hidden
+activity-bar.eld

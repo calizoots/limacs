@@ -19,6 +19,7 @@
 ;; Keys (normal state)
 ;; ---------------------------------------------------------------------
 ;;   SPC t a  hide / show the bar
+;;   right-click the bar: tick / untick which icons it shows (remembered)
 ;;   SPC g s  the Git view (changed files)
 ;;   SPC t m  move the panel you're in to its own tab, and back again
 ;;            (also the ⤢ / ⤡ buttons on a panel's title bar)
@@ -202,6 +203,7 @@ so nothing opens by splitting the tree."
     (git        "Source control"    "SPC g s"   (cod "nf-cod-source_control") my/activity-git        my/activity-git-p)
     (run        "Run"               "SPC r p"   (cod "nf-cod-debug_alt")      my/run-panel-toggle    my/activity-run-p)
     (containers "Containers"        "SPC d d"   (md "nf-md-docker")           my/containers-panel-toggle my/activity-containers-p)
+    (problems   "Problems"          "SPC x w"   (cod "nf-cod-warning")        my/activity-problems   my/activity-problems-p)
     (terminal   "Terminal"          "SPC v t"   (cod "nf-cod-terminal")       my/activity-terminal   my/activity-terminal-p)
     bottom
     (music      "Music"             "SPC m m"   (cod "nf-cod-music")          my/music               my/activity-music-p)
@@ -218,6 +220,52 @@ so nothing opens by splitting the tree."
 (defface my/activity-hover '((t)) "An icon under the mouse.")
 
 (defvar my/activity--bg nil)
+
+;;; which icons show (right-click the bar)
+;; ---------------------------------------------------------------------
+
+(defvar my/activity-state-file (locate-user-emacs-file "activity-bar.eld")
+  "Where the hidden icons are remembered.")
+
+(defvar my/activity-hidden '(problems)
+  "Icons not shown on the bar.")
+
+(defun my/activity--load-hidden ()
+  (when (file-exists-p my/activity-state-file)
+    (let ((hidden (ignore-errors
+                    (with-temp-buffer (insert-file-contents my/activity-state-file)
+                                      (read (current-buffer))))))
+      (when (listp hidden) (setq my/activity-hidden hidden)))))
+
+(defun my/activity-toggle-icon (id)
+  "Show or hide the icon ID on the bar."
+  (interactive
+   (list (intern (completing-read "Show or hide: "
+                                  (mapcar (lambda (item) (symbol-name (car item)))
+                                          (seq-filter #'consp my/activity-items))
+                                  nil t))))
+  (setq my/activity-hidden (if (memq id my/activity-hidden)
+                               (delq id my/activity-hidden)
+                             (cons id my/activity-hidden)))
+  (with-temp-file my/activity-state-file (prin1 my/activity-hidden (current-buffer)))
+  (my/activity-render))
+
+(defun my/activity-icons-menu (&optional event)
+  "A checklist of the bar's icons; untick to hide one (VS Code's right-click)."
+  (interactive "e")
+  (popup-menu
+   (my/menu "Activity bar"
+            (append
+             (mapcar (lambda (item)
+                       (let ((id (car item)))
+                         `(,(nth 1 item) ,(lambda () (interactive) (my/activity-toggle-icon id))
+                           :button (:toggle . (not (memq ',id my/activity-hidden))))))
+                     (seq-filter #'consp my/activity-items))
+             '("--" ("Hide the bar" my/activity-bar-mode))))
+   event))
+
+(defun my/activity--shown (items)
+  (seq-remove (lambda (item) (and (consp item) (memq (car item) my/activity-hidden))) items))
 
 (defun my/activity-apply-theme (&rest _)
   (let* ((bg (my/tab--face-color 'default :background "#1e1f22"))
@@ -283,8 +331,9 @@ so nothing opens by splitting the tree."
     (let* ((window (get-buffer-window buf))
            (window-px (if window (window-body-width window t) 48))
            (height-px (if window (window-body-height window t) 800))
-           (top (seq-take-while (lambda (i) (not (eq i 'bottom))) my/activity-items))
-           (bottom (cdr (memq 'bottom my/activity-items))))
+           (items (my/activity--shown my/activity-items))
+           (top (seq-take-while (lambda (i) (not (eq i 'bottom))) items))
+           (bottom (cdr (memq 'bottom items))))
       (with-current-buffer buf
         (let ((inhibit-read-only t))
           (erase-buffer)
@@ -310,7 +359,11 @@ so nothing opens by splitting the tree."
     (when item
       (let ((command (nth 4 item)))
         (if (fboundp command)
-            (call-interactively command)
+            ;; run as itself, so it gets the same popup as from its key
+            ;; (the popup style is picked by the command's name)
+            (progn (setq this-command command
+                         real-this-command command)
+                   (call-interactively command))
           (message "%s isn't available" (nth 1 item))))
       (my/activity-render))))
 
@@ -318,7 +371,7 @@ so nothing opens by splitting the tree."
   "<down-mouse-1>" #'ignore
   "<mouse-1>" #'my/activity-click
   "<double-mouse-1>" #'ignore
-  "<down-mouse-3>" #'ignore
+  "<down-mouse-3>" #'my/activity-icons-menu
   "<mouse-3>" #'ignore
   "<wheel-up>" #'ignore
   "<wheel-down>" #'ignore)
@@ -627,6 +680,7 @@ so nothing opens by splitting the tree."
       window-divider-default-bottom-width 1)
 (window-divider-mode 1)
 
+(my/activity--load-hidden)
 (my/activity-apply-theme)
 (my/panel--apply-theme)
 (dolist (fn '(load-theme enable-theme disable-theme))

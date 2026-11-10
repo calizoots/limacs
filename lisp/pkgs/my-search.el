@@ -84,9 +84,11 @@
 ;; buffers: consult's own source (preview included), minus the noise
 
 (defvar my/search--source-buffers
-  (append (list :name "Buffers" :narrow ?b)
+  (append (list :name "Buffers" :narrow ?b
+                ;; no preview: showing a terminal or panel buffer pops its window open
+                :preview-key nil)
           (cl-loop for (k v) on consult-source-buffer by #'cddr
-                   unless (memq k '(:name :narrow :default))
+                   unless (memq k '(:name :narrow :default :preview-key))
                    append (list k v))))
 
 ;; recent files
@@ -404,6 +406,8 @@
 (defvar my/search--source-project-buffers
   `( :name "Buffers" :narrow ?b :category buffer
      :history buffer-name-history
+     ;; no preview: showing a terminal or panel buffer pops its window open
+     :preview-key nil
      :state ,#'consult--buffer-state
      :items
      ,(lambda ()
