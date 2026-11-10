@@ -932,6 +932,10 @@ file is named and tagged with those instead of the uploader's."
   (let ((buf (get-buffer-create my/music-page-buffer)))
     (with-current-buffer buf
       (unless (derived-mode-p 'my/music-mode) (my/music-mode))
+      ;; its own folder, not whichever project's tab made it
+      (setq default-directory (if (file-directory-p my/music-directory)
+                                  my/music-directory
+                                (expand-file-name "~/")))
       (my/music-page--render))
     buf))
 

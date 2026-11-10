@@ -410,7 +410,16 @@
         (consult--buffer-query :sort 'visibility
                                :directory my/search--root
                                :exclude (append my/search-hidden-buffers consult-buffer-filter)
+                               :predicate #'my/search--project-buffer-p
                                :as #'consult--buffer-pair))))
+
+(defun my/search--project-buffer-p (buffer)
+  "Non-nil for BUFFER as part of a project: files, folders, terminals, logs.
+Pages like Music or Services aren't, whatever folder they were opened from."
+  (with-current-buffer buffer
+    (or buffer-file-name
+        (derived-mode-p 'dired-mode 'ghostel-mode 'vterm-mode 'shell-mode 'eshell-mode
+                        'compilation-mode 'my/task-log-mode))))
 
 ;; files, the ones you opened lately first
 
