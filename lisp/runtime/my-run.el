@@ -110,10 +110,30 @@
                   (my/run--spec name (list runner "run" name) runner)))
               (alist-get 'scripts json)))))
 
+(defun my/run--cargo-targets (root dir)
+  "Names of the cargo targets in ROOT/DIR: NAME.rs files and NAME/main.rs folders."
+  (let ((path (expand-file-name dir root)))
+    (when (file-directory-p path)
+      (delete-dups
+       (delq nil
+             (mapcar (lambda (file)
+                       (cond ((string-suffix-p ".rs" file) (file-name-base file))
+                             ((file-exists-p (expand-file-name "main.rs" (expand-file-name file path)))
+                              file)))
+                     (directory-files path nil "\\`[^.]")))))))
+
 (defun my/run--detect-cargo (root)
   (when (my/run--file root "Cargo.toml")
-    (mapcar (lambda (cmd) (my/run--spec cmd (list "cargo" cmd) "cargo" 'task))
-            '("run" "build" "test" "check" "clippy"))))
+    (append
+     (mapcar (lambda (cmd) (my/run--spec cmd (list "cargo" cmd) "cargo" 'task))
+             '("run" "build" "test" "check" "clippy"))
+     ;; examples/ and src/bin/ each get their own entry
+     (mapcar (lambda (name) (my/run--spec (concat "example " name)
+                                          (list "cargo" "run" "--example" name) "cargo" 'task))
+             (my/run--cargo-targets root "examples"))
+     (mapcar (lambda (name) (my/run--spec (concat "bin " name)
+                                          (list "cargo" "run" "--bin" name) "cargo" 'task))
+             (my/run--cargo-targets root "src/bin")))))
 
 (defun my/run--detect-zig (root)
   (when (my/run--file root "build.zig")

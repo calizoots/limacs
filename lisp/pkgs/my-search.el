@@ -11,6 +11,9 @@
 ;; prompt goes back to All.
 ;;
 ;;   SPC SPC   search everywhere
+;;   SPC p SPC search only this project: its buffers, files (recent first),
+;;             symbols across the project (language server), run configs
+;;             and cargo tests, and the text of every file (t, ripgrep)
 ;;   SPC m /   search music (also / on the music page): songs, artists and
 ;;             playlists; picking one lists what to do (RET RET plays)
 ;;   C-RET     pick and do the first option straight away
@@ -381,6 +384,214 @@
     my/search--source-songs)
   "What Search Everywhere looks through, in the order the groups show.")
 
+;;; searching inside the project
+;; ---------------------------------------------------------------------
+;; SPC p SPC: only this project.  Its buffers, its files (recently opened
+;; first), symbols across the whole project from the language server,
+;; things to run (cargo tests included) and the text of every file.
+
+(defun my/search--in-root-p (file)
+  (and file my/search--root
+       (string-prefix-p my/search--root (expand-file-name file))))
+
+;; buffers
+
+(defvar my/search-hidden-buffers
+  '("\\`\\*lsp-log\\*" "\\`\\*NeoTree" "\\`\\*rust-analyzer" "::stderr\\*\\'"
+    "\\`\\*Flycheck" "\\`\\*\\(Messages\\|Warnings\\|Compile-Log\\)\\*")
+  "Buffers the project search leaves out (regexps on their names).")
+
+(defvar my/search--source-project-buffers
+  `( :name "Buffers" :narrow ?b :category buffer
+     :history buffer-name-history
+     :state ,#'consult--buffer-state
+     :items
+     ,(lambda ()
+        (consult--buffer-query :sort 'visibility
+                               :directory my/search--root
+                               :exclude (append my/search-hidden-buffers consult-buffer-filter)
+                               :as #'consult--buffer-pair))))
+
+;; files, the ones you opened lately first
+
+(defun my/search--project-recent ()
+  "Recently opened files of the project, relative to its root."
+  (let (files)
+    (dolist (file recentf-list (nreverse files))
+      (when (my/search--in-root-p file)
+        (push (file-relative-name (expand-file-name file) my/search--root) files)))))
+
+(defvar my/search--source-project-files
+  `( :name "Files" :narrow ?f :category file
+     :state
+     ,(lambda ()
+        (let ((preview (consult--file-state)))
+          (lambda (action cand)
+            (funcall preview action
+                     (and cand (expand-file-name cand my/search--root))))))
+     :items
+     ,(lambda ()
+        (delete-dups (append (my/search--project-recent)
+                             (my/search--project-files my/search--root))))))
+
+;; symbols across the project, from the language server (lsp-mode)
+
+(declare-function lsp-request-while-no-input "lsp-mode")
+(declare-function lsp--uri-to-path "lsp-mode")
+(defvar lsp-symbol-kinds)
+
+(defun my/search--lsp-buffer ()
+  "A buffer of the project with a language server running, or nil."
+  (seq-find (lambda (buffer)
+              (with-current-buffer buffer
+                (and (bound-and-true-p lsp-mode)
+                     (my/search--in-root-p buffer-file-name))))
+            (cons my/search--origin (buffer-list))))
+
+(defun my/search--symbol-query (input)
+  ;; rust-analyzer only looks for types unless the query ends in #
+  (if (derived-mode-p 'rust-mode 'rust-ts-mode)
+      (concat input "#")
+    input))
+
+(defun my/search--lsp-get (object key)
+  "KEY of a language server reply OBJECT (a hash table or a plist)."
+  (if (hash-table-p object)
+      (gethash (substring (symbol-name key) 1) object)
+    (plist-get object key)))
+
+(defun my/search--lsp-symbol (symbol)
+  "SYMBOL from workspace/symbol as (DISPLAY FILE LINE COLUMN), or nil."
+  (let* ((location (my/search--lsp-get symbol :location))
+         (file (lsp--uri-to-path (my/search--lsp-get location :uri)))
+         (start (my/search--lsp-get (my/search--lsp-get location :range) :start)))
+    (when (and start (my/search--in-root-p file))
+      (let ((line (1+ (my/search--lsp-get start :line)))
+            (kind (alist-get (my/search--lsp-get symbol :kind) lsp-symbol-kinds ""))
+            (container (my/search--lsp-get symbol :containerName)))
+        (list (concat (my/search--lsp-get symbol :name) "  "
+                      (propertize (string-join
+                                   (delq nil (list (downcase kind)
+                                                   (and (stringp container)
+                                                        (not (string-empty-p container))
+                                                        container)
+                                                   (format "%s:%d" (file-relative-name file my/search--root)
+                                                           line)))
+                                   " · ")
+                                  'face 'shadow))
+              file line (my/search--lsp-get start :character))))))
+
+(defun my/search--lsp-symbols (input)
+  (when-let ((buffer (my/search--lsp-buffer)))
+    (with-current-buffer buffer
+      (let* ((non-essential t)   ; give up as soon as you type again
+             (reply (ignore-errors
+                      (lsp-request-while-no-input
+                       "workspace/symbol" (list :query (my/search--symbol-query input))))))
+        (when (sequencep reply)
+          (my/search--rank-symbols
+           input
+           (mapcar (lambda (item) (cons (car item) (cdr item)))
+                   (delq nil (mapcar #'my/search--lsp-symbol reply)))))))))
+
+(defun my/search--rank-symbols (input symbols)
+  "SYMBOLS with the names closest to INPUT first: exact, prefix, the rest."
+  (let ((case-fold-search t))
+    (cl-flet ((rank (symbol)
+                (let ((name (car (split-string (car symbol) "  "))))
+                  (cond ((string-equal-ignore-case name input) 0)
+                        ((string-prefix-p input name t) 1)
+                        ((string-search (downcase input) (downcase name)) 2)
+                        (t 3)))))
+      (sort symbols :key #'rank))))
+
+(defun my/search--location-state ()
+  "Preview and jump for candidates that are (FILE LINE COLUMN)."
+  (let ((open (consult--temporary-files))
+        (jump (consult--jump-state)))
+    (lambda (action cand)
+      (unless cand (funcall open))
+      (funcall jump action
+               (and cand
+                    (consult--marker-from-line-column
+                     (funcall (if (eq action 'return) #'consult--file-action open) (nth 0 cand))
+                     (nth 1 cand) (or (nth 2 cand) 0)))))))
+
+(defvar my/search--source-project-symbols
+  `( :name "Symbols" :narrow ?s :category my-symbol
+     :enabled ,(lambda () (my/search--lsp-buffer))
+     :annotate ignore
+     :state my/search--location-state
+     :async ,(consult--dynamic-collection #'my/search--lsp-symbols :min-input 2 :highlight t)))
+
+;; without a language server: the symbols of the file you came from
+(defvar my/search--source-file-symbols
+  (append (list :enabled (lambda () (and (not (my/search--lsp-buffer))
+                                         (funcall (plist-get my/search--source-symbols :enabled)))))
+          my/search--source-symbols))
+
+;; things to run, cargo tests included
+
+(defun my/search--cargo-tests ()
+  "Each #[test] fn in the project as (NAME FILE LINE)."
+  (when (and (file-exists-p (expand-file-name "Cargo.toml" my/search--root))
+             (executable-find "rg"))
+    (let ((default-directory my/search--root))
+      (delq nil
+            (mapcar (lambda (line)
+                      (when (string-match "\\`\\(.*?\\):\\([0-9]+\\):\\(.+\\)\\'" line)
+                        (list (match-string 3 line) (match-string 1 line)
+                              (string-to-number (match-string 2 line)))))
+                    (process-lines-ignore-status
+                     "rg" "--no-heading" "--line-number" "--no-require-git" "--color=never"
+                     "--multiline" "--only-matching" "--type" "rust" "--replace" "$1"
+                     (concat "#\\[(?:tokio::|async_std::)?test[^\\]]*\\]\\s*"
+                             "(?:#\\[[^\\]]*\\]\\s*)*(?:pub\\s+)?(?:async\\s+)?fn\\s+(\\w+)")))))))
+
+(defvar my/search--source-project-run
+  `( :name "Run" :narrow ?x :category my-run
+     :enabled ,(lambda () (fboundp 'my/run-configs))
+     :items
+     ,(lambda ()
+        (append
+         (mapcar (lambda (spec)
+                   (cons (concat (plist-get spec :name) "  "
+                                 (propertize (my/run--command-string (plist-get spec :command))
+                                             'face 'shadow))
+                         spec))
+                 (ignore-errors (my/run-configs my/search--root)))
+         (mapcar (lambda (test)
+                   (pcase-let ((`(,name ,file ,line) test))
+                     (cons (concat "test " name "  "
+                                   (propertize (format "%s:%d" file line) 'face 'shadow))
+                           (list :name (concat "test " name) :source "cargo" :kind 'task
+                                 :command (list "cargo" "test" name)
+                                 :file (expand-file-name file my/search--root) :line line))))
+                 (my/search--cargo-tests))))
+     :annotate ,(lambda (spec) (and (eq (plist-get spec :kind) 'server)
+                                    (propertize "  server" 'face 'success)))
+     :action ,(lambda (spec) (my/run-spec spec my/search--root))))
+
+;; the text of every file (ripgrep, as you type)
+
+(defun my/search--source-text ()
+  "A fresh text source (the ripgrep command is worked out per search)."
+  (let ((builder (consult--ripgrep-make-builder (list "."))))
+    (list :name "Text" :narrow ?t :category 'consult-grep
+          :annotate #'ignore
+          :state #'consult--grep-state
+          :async (consult--process-collection builder
+                   :transform (consult--grep-format builder)
+                   :file-handler t))))
+
+(defun my/search--project-sources ()
+  (list 'my/search--source-project-buffers
+        'my/search--source-project-files
+        'my/search--source-project-symbols
+        'my/search--source-file-symbols
+        'my/search--source-project-run
+        (my/search--source-text)))
+
 ;;; stepping through the kinds with TAB
 ;; ---------------------------------------------------------------------
 
@@ -440,6 +651,32 @@ replaces \"Search everywhere: \"."
   (interactive)
   (my/search--popup #'my/search-everywhere))
 
+(defun my/search-project (&optional narrow)
+  "Search only the current project: buffers, files, symbols, run, text.
+NARROW is a kind's letter to start in."
+  (interactive)
+  (let* ((my/search--quick nil)
+         (my/search--origin (if (minibufferp) (window-buffer (minibuffer-selected-window))
+                              (current-buffer)))
+         (my/search--root (or (my/search--project-root)
+                              (user-error "This tab has no project (SPC p o opens one)")))
+         (my/search--root (file-name-as-directory (expand-file-name my/search--root)))
+         (default-directory my/search--root)
+         ;; the whole input goes to every group (no "#" prefix to type)
+         (consult-async-split-style nil))
+    (consult--multi (my/search--project-sources)
+                    :prompt (format "Search %s: "
+                                    (file-name-nondirectory (directory-file-name my/search--root)))
+                    :keymap my/search-map
+                    :initial-narrow narrow
+                    :require-match t
+                    :sort nil)))
+
+(defun my/search-project-popup ()
+  "`my/search-project' in the vertico popup."
+  (interactive)
+  (my/search--popup #'my/search-project))
+
 (defun my/search-music ()
   "Search songs, artists and playlists, each with a list of what to do."
   (interactive)
@@ -454,12 +691,14 @@ replaces \"Search everywhere: \"."
 (with-eval-after-load 'vertico-multiform
   ;; the popup is chosen by the command the key ran, so list each entry point
   (dolist (command '(my/search-everywhere my/search-everywhere-popup
+                    my/search-project my/search-project-popup
 					  my/search-music my/search--music-1))
     (add-to-list 'vertico-multiform-commands (list command 'posframe))))
 
 (with-eval-after-load 'evil
   (evil-define-key 'normal 'global
 		   (kbd "<leader>SPC") #'my/search-everywhere-popup
+		   (kbd "<leader>pSPC") #'my/search-project-popup
 		   (kbd "<leader>m/") #'my/search-music)
   ;; on the music page / searches music the same way
   (with-eval-after-load 'my-music
@@ -467,6 +706,7 @@ replaces \"Search everywhere: \"."
 
 (with-eval-after-load 'which-key
   (which-key-add-key-based-replacements "SPC SPC" "search everywhere")
+  (which-key-add-key-based-replacements "SPC p SPC" "search this project")
   (which-key-add-key-based-replacements "SPC m /" "search music"))
 
 (provide 'my-search)
