@@ -60,6 +60,8 @@
   ;; the tree and the code become one permanent block, so closing a
   ;; bottom panel can't dissolve it (the panel would come back under
   ;; the tree alone)
+  ;; the bar first, so the tree lands to its right
+  (my/activity--now)
   (let ((window (let ((window-combination-limit t))
                   (split-window (window-main-window) (- (or (bound-and-true-p neo-window-width) 35))
                                 'left))))
@@ -556,10 +558,12 @@ so nothing opens by splitting the tree."
   (if my/activity-bar-mode
       (progn
         (add-hook 'window-configuration-change-hook #'my/activity--changed)
-        (add-hook 'tab-bar-tab-post-select-functions #'my/activity--soon)
+        (add-hook 'tab-bar-tab-post-select-functions #'my/activity--now)
+        (add-hook 'tab-bar-tab-post-open-functions #'my/activity--now)
         (my/activity-ensure))
     (remove-hook 'window-configuration-change-hook #'my/activity--changed)
-    (remove-hook 'tab-bar-tab-post-select-functions #'my/activity--soon)
+    (remove-hook 'tab-bar-tab-post-select-functions #'my/activity--now)
+    (remove-hook 'tab-bar-tab-post-open-functions #'my/activity--now)
     (when-let ((window (my/activity--window))) (delete-window window))))
 
 (defun my/activity--window (&optional frame)
@@ -596,6 +600,10 @@ so nothing opens by splitting the tree."
         (set-window-scroll-bars window 0 nil 0 nil)))
     (my/activity-render)))
 
+(defun my/activity--now (&rest _)
+  "Add the bar right away (tab opened or switched: the layout is settled)."
+  (ignore-errors (my/activity-ensure)))
+
 (defvar my/activity--pending nil)
 
 (defun my/activity--soon (&rest _)
@@ -612,7 +620,7 @@ so nothing opens by splitting the tree."
 
 ;; the bar is rebuilt after a session restores its tabs
 (with-eval-after-load 'my-session
-  (advice-add 'my/session-load :after (lambda (&rest _) (my/activity--soon))))
+  (advice-add 'my/session-load :after (lambda (&rest _) (my/activity--now))))
 
 (setq window-divider-default-places t
       window-divider-default-right-width 1
