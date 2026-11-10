@@ -9,7 +9,7 @@
         neo-vc-integration nil
         neo-smart-open t
         neo-window-width 35
-        neo-show-hidden-files 0)
+        neo-show-hidden-files nil)   ; dotfiles hidden (' in the tree shows them)
 
   (defun my/neotree-open ()
     "Open the NeoTree belonging to the current project."

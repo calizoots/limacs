@@ -10,7 +10,7 @@
 ;; its key.
 ;;
 ;;   top:     File tree · Search · Git (changed files) · Run · Containers
-;;            · Problems · Terminal
+;;            · Terminal
 ;;   bottom:  Music · Menu (everything, same as clicking NORMAL)
 ;;
 ;; The tree and the Git view share the spot beside the bar, like VS
@@ -171,7 +171,6 @@
     (git        "Source control"    "SPC g s"   (cod "nf-cod-source_control") my/activity-git        my/activity-git-p)
     (run        "Run"               "SPC r p"   (cod "nf-cod-debug_alt")      my/run-panel-toggle    my/activity-run-p)
     (containers "Containers"        "SPC d d"   (md "nf-md-docker")           my/containers-panel-toggle my/activity-containers-p)
-    (problems   "Problems"          "SPC x w"   (cod "nf-cod-warning")        my/activity-problems   my/activity-problems-p)
     (terminal   "Terminal"          "SPC v t"   (cod "nf-cod-terminal")       my/activity-terminal   my/activity-terminal-p)
     bottom
     (music      "Music"             "SPC m m"   (cod "nf-cod-music")          my/music               my/activity-music-p)
@@ -198,7 +197,8 @@
     (setq my/activity--bg (my/tab--mix "#000000" bg (if dark 0.16 0.04)))
     (set-face-attribute 'my/activity-icon nil :foreground (my/tab--mix fg bg 0.42))
     (set-face-attribute 'my/activity-active nil :foreground fg)
-    (set-face-attribute 'my/activity-marker nil :background accent)
+    (ignore accent)
+    (set-face-attribute 'my/activity-marker nil :background (my/tab--mix fg bg 0.85))
     (set-face-attribute 'my/activity-hover nil :foreground fg)
     ;; light 1px lines between every pane, so each one reads as a box
     (let ((line (my/tab--mix fg bg (if dark 0.16 0.20))))
@@ -227,17 +227,19 @@
                (glyph (propertize (substring-no-properties glyph) 'face face))
                (glyph-px (string-pixel-width glyph))
                (marker-px 2))
-    (concat
-     ;; VS Code's accent: a 2px bar down the left edge of the open one;
-     ;; it also sets the row's height, with the icon centred in it
-     (propertize " " 'display `(space :width (,marker-px) :height (,my/activity-row) :ascent 62)
-                 'face (if active 'my/activity-marker 'default))
-     (propertize " " 'display `(space :align-to (,(max marker-px (/ (- window-px glyph-px) 2)))))
-     (propertize glyph
-                 'mouse-face 'my/activity-hover
-                 'help-echo (if key (format "%s  (%s)" label key) label)
-                 'my/activity id)
-     "\n")))
+    ;; the whole row (not just the glyph) belongs to the icon, so a click
+    ;; anywhere on it does the right thing
+    (propertize
+     (concat
+      ;; VS Code's accent: a 2px bar down the left edge of the open one;
+      ;; it also sets the row's height, with the icon centred in it
+      (propertize " " 'display `(space :width (,marker-px) :height (,my/activity-row) :ascent 62)
+                  'face (if active 'my/activity-marker 'default))
+      (propertize " " 'display `(space :align-to (,(max marker-px (/ (- window-px glyph-px) 2)))))
+      (propertize glyph 'mouse-face 'my/activity-hover)
+      "\n")
+     'help-echo (if key (format "%s  (%s)" label key) label)
+     'my/activity id)))
 
 (defun my/activity--style ()
   (setq-local face-remapping-alist
@@ -297,6 +299,7 @@
               cursor-type nil
               truncate-lines t
               line-spacing nil
+              cursor-in-non-selected-windows nil
               window-size-fixed 'width)
   (display-line-numbers-mode -1)
   (my/activity--style)
@@ -377,19 +380,22 @@
                                       nil nil "…")
                                      'face 'my/panel-hint))
          "")
-      mode-line-format-right-align
-      ,(my/panel--button (my/panel--icon "nf-cod-screen_full" "⤢")
-                         "Open in its own tab  (SPC t m)" #'my/panel-to-tab)
-      ,(my/panel--button (my/panel--icon "nf-cod-close" "✕") "Close" #'my/panel-close)
-      " ")))
+      ,@(my/panel--right
+         (concat (my/panel--button (my/panel--icon "nf-cod-link_external" "⤢")
+                                   "Move to its own tab  (SPC t m)" #'my/panel-to-tab)
+                 (my/panel--button (my/panel--icon "nf-cod-close" "✕") "Close" #'my/panel-close))))))
+
+(defun my/panel--right (buttons)
+  "BUTTONS pushed flush against the right edge (measured in pixels)."
+  (list (propertize " " 'display `(space :align-to (- right (,(string-pixel-width buttons)))))
+        buttons))
 
 (defun my/panel--tab-header (window)
   `(" " ,(propertize (or (my/panel--title (buffer-local-value 'my/panel--kind (window-buffer window))) "")
                      'face 'my/panel-title)
-    mode-line-format-right-align
-    ,(my/panel--button (my/panel--icon "nf-cod-screen_normal" "⤡")
-                       "Back to the panel it came from  (SPC t m)" #'my/panel-back)
-    " "))
+    ,@(my/panel--right
+       (my/panel--button (my/panel--icon "nf-cod-layout_panel" "⤡")
+                         "Dock back into the tab it came from  (SPC t m)" #'my/panel-back))))
 
 (defvar-local my/panel--kind nil "The panel this buffer was, while it has a tab of its own.")
 (defvar-local my/panel--home nil "Id of the tab it came from.")
@@ -450,9 +456,13 @@
     (switch-to-buffer buffer)
     (let ((tab (tab-bar--current-tab-find)))
       (setf (alist-get 'my/panel-tab (cdr tab)) t
-            (alist-get 'my-project-id (cdr tab)) project)
+            (alist-get 'my-project-id (cdr tab)) nil)
       (tab-bar-tabs-set (funcall tab-bar-tabs-function)))
-    (tab-bar-rename-tab (capitalize (downcase (my/panel--title kind))))
+    (tab-bar-rename-tab
+     (concat (capitalize (downcase (my/panel--title kind)))
+             (when-let ((name (and project (fboundp 'my/project-by-id)
+                                   (plist-get (my/project-by-id project) :name))))
+               (concat " · " name))))
     (my/panel-decorate)))
 
 (defun my/session--leave-side-window-safe ()
