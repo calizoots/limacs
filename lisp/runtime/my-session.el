@@ -83,6 +83,7 @@ overwrite the last session with an empty one.")
 ;; ---------------------------------------------------------------------
 
 (defvar my/run-panel--root)
+(defvar my/containers--root)
 (defvar my/music-directory)
 (defvar my/services-buffer)
 (defvar my/services--timer)
@@ -99,6 +100,8 @@ overwrite the last session with an empty one.")
      ((derived-mode-p 'my/run-panel-mode 'my/task-log-mode)
       (list 'run (or (bound-and-true-p my/run-panel--root) default-directory)))
      ((derived-mode-p 'my/services-mode) '(services))
+     ((derived-mode-p 'my/containers-mode)
+      (list 'containers (and (stringp (bound-and-true-p my/containers--root)) my/containers--root)))
      ((derived-mode-p 'ghostel-mode 'vterm-mode 'shell-mode 'eshell-mode)
       (list 'terminal (expand-file-name default-directory)))
      ((equal (buffer-name) "*scratch*") '(scratch)))))
@@ -135,6 +138,7 @@ overwrite the last session with an empty one.")
     (`(run ,root) (and (fboundp 'my/run-panel--buffer) (file-directory-p root)
                        (my/run-panel--buffer root)))
     ('(services) (and (fboundp 'my/services-mode) (my/session--services-buffer)))
+    (`(containers ,root) (and (fboundp 'my/containers--buffer) (my/containers--buffer root)))
     (`(terminal ,dir) (and (file-directory-p dir) (my/session--terminal dir)))
     ('(scratch) (get-scratch-buffer-create))))
 
@@ -304,15 +308,16 @@ SKIPPED-P tells whether a path's drive was skipped."
            (tab-bar-new-tab-choice t))
       (unless tabs (user-error "Nothing in %s could be opened" name))
       (tab-bar-mode 1)
-      ;; start from one plain tab
+      ;; start from one plain tab, out of any side panel
       (tab-bar-close-other-tabs)
+      (my/session--leave-side-window)
       (let ((tab (my/project-current-tab-safe)))
         (setf (alist-get 'my/pinned (cdr tab)) nil
               (alist-get 'my-project-id (cdr tab)) nil
               (alist-get 'explicit-name (cdr tab)) nil))
       (delete-other-windows)
       (cl-loop for tab in tabs for i from 0 do
-               (unless (zerop i) (tab-bar-new-tab-to -1))
+               (unless (zerop i) (tab-bar-new-tab-to -1) (my/session--leave-side-window))
                (my/session--restore-tab tab skipped-p))
       ;; pins last, so making tabs didn't shuffle them
       (let ((all (funcall tab-bar-tabs-function)))
@@ -329,6 +334,13 @@ SKIPPED-P tells whether a path's drive was skipped."
                (if skipped
                    (format ", skipped %s" (mapconcat (lambda (d) (plist-get d :title)) skipped " and "))
                  "")))))
+
+(defun my/session--leave-side-window ()
+  "Select a normal window if a side panel (Run, containers...) has focus."
+  (when (window-parameter (selected-window) 'window-side)
+    (when-let ((main (seq-find (lambda (w) (not (window-parameter w 'window-side)))
+                               (window-list nil 'nomini))))
+      (select-window main))))
 
 (defun my/project-current-tab-safe ()
   (nth (tab-bar--current-tab-index) (funcall tab-bar-tabs-function)))
