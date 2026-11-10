@@ -100,14 +100,16 @@ and links saved with D are converted to mp3 too.")
 ;; ---------------------------------------------------------------------
 
 (defun my/music-ensure-mounted ()
-  "Load emms and mount the music drive if `my/music-directory' isn't there yet."
+  "Load emms and bring up the music drive if `my/music-directory' isn't there.
+Mounts it when plugged in, otherwise asks for it and waits (see my-drives)."
   (require 'emms)
   (unless (file-directory-p my/music-directory)
-    (message "Mounting music drive…")
-    ;; may pop up a polkit password prompt, that's fine
-    (call-process "udisksctl" nil nil nil "mount" "-b" my/music-device)
+    (if (fboundp 'my/drive-ensure-path)
+        (my/drive-ensure-path my/music-directory "Music")
+      ;; may pop up a polkit password prompt, that's fine
+      (call-process "udisksctl" nil nil nil "mount" "-b" my/music-device))
     (unless (file-directory-p my/music-directory)
-      (user-error "Music drive isn't mounted (%s)" my/music-device))))
+      (user-error "Music drive isn't there (plug it in and try again)"))))
 
 ;;; track info: tags first, then ffprobe, then the folder layout
 ;; ---------------------------------------------------------------------

@@ -34,6 +34,8 @@
 (require 'my-task-ui)
 (require 'my-run)
 (require 'my-services)
+(require 'my-drives)
+(require 'my-session)
 
 ;; treesitter
 
