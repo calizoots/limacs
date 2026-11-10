@@ -57,8 +57,12 @@
 
 (defun my/activity--sidebar-display (buffer _alist)
   "Show BUFFER in a sidebar window: the far left of the editor area."
-  (let ((window (split-window (window-main-window) (- (or (bound-and-true-p neo-window-width) 35))
-                              'left)))
+  ;; the tree and the code become one permanent block, so closing a
+  ;; bottom panel can't dissolve it (the panel would come back under
+  ;; the tree alone)
+  (let ((window (let ((window-combination-limit t))
+                  (split-window (window-main-window) (- (or (bound-and-true-p neo-window-width) 35))
+                                'left))))
     (set-window-buffer window buffer)
     (window-preserve-size window t t)
     window))
