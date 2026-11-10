@@ -27,6 +27,7 @@
 (require 'themes)
 (require 'tabs)
 (require 'modeline)
+(require 'activity-bar)
 (require 'projects)
 
 ;; runtime
