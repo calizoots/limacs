@@ -194,15 +194,16 @@ click commands are made afresh on every redisplay.")
       ("Close" kill-current-buffer))))
 
 (defun my/ml--git-items ()
-  `(("Switch branch…" ,(my/ml--pick #'vc-switch-branch) :enable (fboundp 'vc-switch-branch))
-    ("New branch…" vc-create-branch :enable (fboundp 'vc-create-branch))
+  `(("Switch branch…" my/git-switch-branch :keys "SPC g b")
+    ("New branch…" ,(my/ml--pick #'my/git-new-branch))
     "--"
-    ("Changes (diff)" vc-root-diff)
-    ("Status" vc-dir-root)
+    ("Source Control" my/activity-git :keys "SPC g s")
+    ("Commit" my/git-commit :keys "SPC g c")
     ("History" vc-print-root-log)
     "--"
-    ("Pull" vc-pull)
-    ("Push" vc-push)))
+    ("Pull" my/git-pull :keys "SPC g p")
+    ("Push" my/git-push :keys "SPC g P")
+    ("Fetch" my/git-fetch :keys "SPC g f")))
 
 (defun my/ml--run-items ()
   `(("Run…" ,(my/ml--pick #'my/run) :enable (fboundp 'my/run))
@@ -365,7 +366,7 @@ Less important segments disappear first as a window gets narrower."
                (propertize (concat (my/ml--icon #'all-the-icons-octicon "git-branch") " " branch)
                            'face 'my/ml-dim)
                (format "Branch %s: click to switch branch" branch)
-               (my/ml--pick #'vc-switch-branch) #'my/ml--git-items)))))
+               #'my/git-switch-branch #'my/ml--git-items)))))
 
 (defun my/ml-tasks ()
   (when (and (fboundp 'my/run-running-count) (fboundp 'my/run--root) (my/ml--active-p))

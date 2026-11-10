@@ -38,6 +38,7 @@
 (require 'my-drives)
 (require 'my-session)
 (require 'my-containers)
+(require 'my-git)
 
 ;; treesitter
 

@@ -79,6 +79,7 @@
   "Non-nil if WINDOW is the tree or the Git view beside the bar."
   (and (window-live-p window)
        (or (window-parameter window 'my-activity-git)
+           (window-parameter window 'my-git-message)
            (eq (buffer-local-value 'major-mode (window-buffer window)) 'neotree-mode))))
 
 (defun my/activity--editor-window ()
@@ -112,15 +113,16 @@ so nothing opens by splitting the tree."
   (my/activity--window-with 'my-activity-git))
 
 (defun my/activity-git ()
-  "Show or hide the changed files of the project (vc-dir), beside the bar."
+  "Show or hide the Source Control panel, beside the bar."
   (interactive)
   (if-let ((window (my/activity-git-p)))
-      (delete-window window)
-    (let ((root (or (and (fboundp 'my/project-root) (my/project-root))
-                    (and (fboundp 'vc-root-dir) (vc-root-dir))
+      (progn (when (fboundp 'my/git-close-message-window) (my/git-close-message-window))
+             (delete-window window))
+    (let ((root (or (my/git-root)
+                    (and (fboundp 'my/project-root) (my/project-root))
                     (user-error "Not in a project or repository"))))
       (when (my/activity-explorer-p) (my/activity-explorer))
-      (let* ((buffer (save-window-excursion (vc-dir root) (current-buffer)))
+      (let* ((buffer (my/git--buffer root))
              (window (my/activity--sidebar-display buffer nil)))
         (set-window-parameter window 'my-activity-git t)
         (set-window-parameter window 'no-delete-other-windows t)
@@ -136,7 +138,9 @@ so nothing opens by splitting the tree."
   "Show or hide the project's file tree (closing the Git view)."
   (interactive)
   (unless (my/activity-explorer-p)
-    (when-let ((git (my/activity-git-p))) (delete-window git)))
+    (when-let ((git (my/activity-git-p)))
+      (when (fboundp 'my/git-close-message-window) (my/git-close-message-window))
+      (delete-window git)))
   (if (fboundp 'my/neotree-toggle)
       (my/neotree-toggle)
     (user-error "NeoTree isn't set up")))
@@ -465,9 +469,17 @@ so nothing opens by splitting the tree."
                                      'face 'my/panel-hint))
          "")
       ,@(my/panel--right
-         (concat (my/panel--button (my/panel--icon "nf-cod-link_external" "⤢")
+         (concat (my/panel--extra-buttons kind)
+                 (my/panel--button (my/panel--icon "nf-cod-link_external" "⤢")
                                    "Move to its own tab  (SPC t m)" #'my/panel-to-tab)
                  (my/panel--button (my/panel--icon "nf-cod-close" "✕") "Close" #'my/panel-close))))))
+
+(defun my/panel--extra-buttons (kind)
+  "Buttons of KIND's own before the shared ones (Source Control: commit, refresh, ⋯)."
+  (mapconcat (lambda (b) (apply #'my/panel--button b))
+             (pcase kind
+               ('git (and (fboundp 'my/git-title-buttons) (my/git-title-buttons))))
+             ""))
 
 (defun my/panel--right (buttons)
   "BUTTONS pushed flush against the right edge (measured in pixels)."
@@ -600,7 +612,6 @@ so nothing opens by splitting the tree."
         ((buffer-local-value 'my/panel--kind (current-buffer)) (my/panel-back))
         (t (user-error "Not in a panel (Run, Terminal, Containers, Git, Problems)"))))
 
-(add-hook 'vc-dir-mode-hook (lambda () (display-line-numbers-mode -1)))
 
 ;;; keeping it in every tab
 ;; ---------------------------------------------------------------------
