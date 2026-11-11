@@ -161,11 +161,17 @@
   (when-let ((file (my/run--file root my/run-config-file)))
     (condition-case err
         (mapcar (lambda (c)
-                  (let ((cmd (plist-get c :command)))
-                    (my/run--spec (plist-get c :name)
-                                  (if (stringp cmd) (list "sh" "-c" cmd) cmd)
-                                  "custom"
-                                  (plist-get c :kind))))
+                  (let ((cmd (plist-get c :command))
+                        (group (plist-get c :group)))
+                    (append
+                     (my/run--spec (plist-get c :name)
+                                   (cond (group (list "sh" "-c" (concat "# runs " (string-join group " + "))))
+                                         ((stringp cmd) (list "sh" "-c" cmd))
+                                         (t cmd))
+                                   (if group "group" "custom")
+                                   (plist-get c :kind))
+                     ;; :group runs other configs side by side; :watch reruns on save
+                     (list :group group :watch (plist-get c :watch)))))
                 (with-temp-buffer
                   (insert-file-contents file)
                   (read (current-buffer))))
@@ -208,11 +214,14 @@ One instance per configuration: an old one is stopped, old logs dropped."
                    :kind (plist-get spec :kind))))
 
 (defun my/run-spec (spec root)
-  "Run configuration SPEC in ROOT and show it in the Run panel."
+  "Run configuration SPEC in ROOT and show it in the Run panel.
+A group (:group) runs its members side by side in the compare view."
   (puthash root spec my/run--last)
-  (let ((task (my/run-start spec root)))
-    (my/run-panel-show root task)
-    task))
+  (if (and (plist-get spec :group) (fboundp 'my/compare-run-group))
+      (my/compare-run-group spec root)
+    (let ((task (my/run-start spec root)))
+      (my/run-panel-show root task)
+      task)))
 
 (defun my/run-servers (root)
   "ROOT's configurations marked as servers."
@@ -487,6 +496,10 @@ the url (or the command)."
            (if (eq (plist-get spec :kind) 'server)
                (propertize "  server" 'face 'font-lock-keyword-face)
              "")
+           (if (and (fboundp 'my/compare-watched-p)
+                    (my/compare-watched-p my/run-panel--root (plist-get spec :name)))
+               (propertize "  ↻ on save" 'face 'success)
+             "")
            "\n")
    'my-run-item spec))
 
@@ -740,6 +753,8 @@ the url (or the command)."
     (kbd "v") #'my/run-panel-services
     (kbd "a") #'my/run-add
     (kbd "e") #'my/run-edit
+    (kbd "w") #'my/compare-toggle-watch
+    (kbd "c") #'my/compare-open
     (kbd "g") #'revert-buffer
     (kbd "q") #'my/run-panel-close)
 

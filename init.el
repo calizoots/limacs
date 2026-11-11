@@ -40,6 +40,7 @@
 (require 'my-session)
 (require 'my-containers)
 (require 'my-git)
+(require 'my-compare)
 
 ;; treesitter
 
