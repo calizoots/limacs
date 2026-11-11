@@ -10,6 +10,8 @@
 ;; ---------------------------------------------------------------------
 ;;   mouse rests on a symbol   the popup
 ;;   K  /  SPC c h             the same popup for the symbol at the cursor
+;;   K again                   into the popup to scroll it (q leaves)
+;;   the mouse can move onto the popup and scroll it with the wheel
 ;;   (Settings: "Hover docs" on/off, and how long the mouse has to rest)
 
 (require 'cl-lib)
@@ -38,7 +40,7 @@
         lsp-ui-doc-alignment 'window
         lsp-ui-doc-include-signature t
         lsp-ui-doc-header nil
-        lsp-ui-doc-delay 0.5
+        lsp-ui-doc-delay 0.3
         lsp-ui-doc-max-width 90
         lsp-ui-doc-max-height 20
         lsp-ui-doc-enhanced-markdown t)
@@ -96,10 +98,62 @@
 (with-eval-after-load 'lsp-ui-doc
   (advice-add 'lsp-ui-doc--render-buffer :after #'my/hover--tidy))
 
+;;; reaching the popup with the mouse
+;; ---------------------------------------------------------------------
+;; lsp-ui hides the popup the moment the mouse leaves the word, and the
+;; way down to the popup crosses other text.  So leaving only schedules
+;; a hide: if the mouse is on the popup by then, it stays (and scrolls
+;; with the wheel) until the mouse leaves it.
+
+(defvar my/hover-grace 0.6 "Seconds to reach the popup after leaving the word.")
+(defvar my/hover--hide-timer nil)
+
+(declare-function lsp-ui-doc--hide-frame "lsp-ui-doc")
+(declare-function lsp-ui-doc--get-frame "lsp-ui-doc")
+(declare-function lsp-ui-doc--visible-p "lsp-ui-doc")
+(declare-function lsp-ui-doc-focus-frame "lsp-ui-doc")
+
+(defun my/hover--mouse-on-popup-p ()
+  (let ((frame (and (fboundp 'lsp-ui-doc--get-frame) (lsp-ui-doc--get-frame))))
+    (and frame (frame-visible-p frame)
+         (eq (car (mouse-position)) frame))))
+
+(defun my/hover--cancel-hide (&rest _)
+  (when my/hover--hide-timer
+    (cancel-timer my/hover--hide-timer)
+    (setq my/hover--hide-timer nil)))
+
+(defun my/hover--hide-later (hide)
+  "Run HIDE (lsp-ui's) unless the mouse makes it onto the popup first."
+  (my/hover--cancel-hide)
+  (setq my/hover--hide-timer
+        (run-at-time my/hover-grace nil
+                     (lambda ()
+                       (setq my/hover--hide-timer nil)
+                       (if (my/hover--mouse-on-popup-p)
+                           ;; on the popup: look again once it's left
+                           (my/hover--hide-later hide)
+                         (funcall hide))))))
+
+(defun my/hover--mouse-moved (fn event)
+  "lsp-ui's mouse handler (FN), with its hiding put off."
+  (let ((hide (symbol-function 'lsp-ui-doc--hide-frame)))
+    (cl-letf (((symbol-function 'lsp-ui-doc--hide-frame)
+               (lambda (&rest _) (my/hover--hide-later hide))))
+      (funcall fn event))))
+
+(with-eval-after-load 'lsp-ui-doc
+  (advice-add 'lsp-ui-doc--handle-mouse-movement :around #'my/hover--mouse-moved)
+  ;; new docs showing: whatever hide was pending is for the old ones
+  (advice-add 'lsp-ui-doc--display :before #'my/hover--cancel-hide))
+
 (defun my/hover-docs ()
-  "The docs for the symbol at the cursor, in the same popup as hovering."
+  "The docs for the symbol at the cursor, in the same popup as hovering.
+Pressed again while it shows: into the popup, to scroll it (q leaves)."
   (interactive)
-  (cond ((and (bound-and-true-p lsp-mode) (fboundp 'lsp-ui-doc-glance)) (lsp-ui-doc-glance))
+  (cond ((and (bound-and-true-p lsp-mode) (fboundp 'lsp-ui-doc--visible-p) (lsp-ui-doc--visible-p))
+         (lsp-ui-doc-focus-frame))
+        ((and (bound-and-true-p lsp-mode) (fboundp 'lsp-ui-doc-glance)) (lsp-ui-doc-glance))
         ((bound-and-true-p lsp-mode) (lsp-describe-thing-at-point))
         (t (call-interactively #'describe-symbol))))
 

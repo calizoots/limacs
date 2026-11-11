@@ -559,9 +559,9 @@
   :set (lambda (on) (when (fboundp 'my/hover-set-mouse) (my/hover-set-mouse on))))
 
 (my/defsetting 'hover-delay
-  :section "Editor" :title "Hover delay (seconds)" :type 'number :min 0.1 :max 2.0 :step 0.1 :default 0.5
+  :section "Editor" :title "Hover delay (seconds)" :type 'number :min 0.1 :max 2.0 :step 0.1 :default 0.3
   :doc "How long the mouse rests before the docs show."
-  :get (lambda () (if (boundp 'lsp-ui-doc-delay) lsp-ui-doc-delay 0.5))
+  :get (lambda () (if (boundp 'lsp-ui-doc-delay) lsp-ui-doc-delay 0.3))
   :set (lambda (v) (setq lsp-ui-doc-delay v)))
 
 (my/defsetting 'code-menu-actions
