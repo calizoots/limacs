@@ -372,6 +372,89 @@
      ,(lambda (file)
         (my/search--choose (file-name-base file) (my/search--playlist-options file)))))
 
+;; quick: plain words for things that are commands underneath.  Type
+;; "volume" (or "louder", "sound") and pick Volume for Up 5, Down 10,
+;; Set volume...  Each entry is (NAME ALSO-MATCHES ITEMS), ITEMS being a
+;; function returning menu items (see `my/menu'), or a command to run.
+
+(defun my/search--vol (delta)
+  (my/search--do (my/music-set-volume (+ my/music-volume delta))))
+
+(defvar my/search-quick
+  `(("Volume" "sound louder quieter loud quiet mute music"
+     ,(lambda ()
+        `(("Up 5" ,(my/search--vol 5))
+          ("Up 10" ,(my/search--vol 10))
+          ("Down 5" ,(my/search--vol -5))
+          ("Down 10" ,(my/search--vol -10))
+          ("Set volume…" my/music-set-volume)
+          ("Mute" ,(my/search--do (my/music-set-volume 0))))))
+    ("Music" "play pause song track next previous skip shuffle repeat lyrics"
+     ,(lambda ()
+        '(("Play / pause" my/music-toggle)
+          ("Next song" my/music-next)
+          ("Previous song" my/music-previous)
+          ("Shuffle everything" my/music-shuffle-all)
+          ("Shuffle on / off" my/music-toggle-shuffle)
+          ("Repeat: cycle" my/music-cycle-repeat)
+          ("Lyrics" my/music-lyrics)
+          ("Open the music page" my/music))))
+    ("Git" "commit push pull fetch branch stash source control"
+     ,(lambda ()
+        '(("Source Control panel" my/activity-git)
+          ("Commit" my/git-commit)
+          ("Push" my/git-push)
+          ("Pull" my/git-pull)
+          ("Sync (pull, then push)" my/git-sync)
+          ("Fetch" my/git-fetch)
+          ("Switch branch…" my/git-switch-branch)
+          ("New branch…" my/git-new-branch)
+          ("Stash changes…" my/git-stash)
+          ("Pop the last stash" my/git-stash-pop))))
+    ("Session" "workspace layout save load restore tabs"
+     ,(lambda ()
+        '(("Load a session…" my/session-pick-popup)
+          ("Save this session as…" my/session-save))))
+    ("Containers" "docker podman database postgres redis"
+     ,(lambda ()
+        '(("This project's containers (panel)" my/containers-panel-toggle)
+          ("All containers (tab)" my/containers)
+          ("Start this project's containers" my/containers-up)
+          ("Stop this project's containers" my/containers-down))))
+    ("Run" "build test cargo start launch"
+     ,(lambda ()
+        '(("Run…" my/run)
+          ("Run the last one again" my/run-last)
+          ("Build" my/run-build)
+          ("Test" my/run-test)
+          ("Run panel" my/run-panel-toggle))))
+    ("Theme" "colours colors look dark light" my/load-theme))
+  "Quick entries for Search Everywhere: (NAME ALSO-MATCHES ITEMS-OR-COMMAND).")
+
+(defun my/search--quick-items (items)
+  "ITEMS without the ones whose command isn't loaded."
+  (seq-filter (lambda (item)
+                (pcase item
+                  (`(,_ ,(and command (pred symbolp)) . ,_) (fboundp command))
+                  (_ t)))
+              items))
+
+(defvar my/search--source-quick
+  `( :name "Quick" :narrow ?q :category my-quick
+     :items
+     ,(lambda ()
+        (mapcar (lambda (entry)
+                  (concat (car entry) (propertize (concat "   " (cadr entry)) 'face 'shadow)))
+                my/search-quick))
+     :action
+     ,(lambda (cand)
+        (when-let ((entry (seq-find (lambda (e) (string-prefix-p (car e) cand)) my/search-quick)))
+          (let ((what (nth 2 entry)))
+            (if (and (symbolp what) (commandp what))
+                (call-interactively what)
+              (my/search--choose (car entry)
+                                 (my/search--quick-items (funcall what)))))))))
+
 (defvar my/search-sources
   '(my/search--source-tabs
     my/search--source-buffers
@@ -380,6 +463,7 @@
     my/search--source-symbols
     my/search--source-run
     my/search--source-projects
+    my/search--source-quick
     my/search--source-actions
     my/search--source-playlists
     my/search--source-artists

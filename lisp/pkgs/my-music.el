@@ -436,7 +436,7 @@ re-read, and anything gone (or junk) is dropped from the cache."
            (current-buffer))))
 
 (defun my/music--apply-volume (&rest _)
-  (when (and emms-player-playing-p (fboundp 'emms-player-mpv-cmd))
+  (when (and (bound-and-true-p emms-player-playing-p) (fboundp 'emms-player-mpv-cmd))
     (emms-player-mpv-cmd `(set_property volume ,my/music-volume))))
 
 (defun my/music-set-volume (volume)
