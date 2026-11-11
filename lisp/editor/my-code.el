@@ -30,6 +30,11 @@
 (declare-function nerd-icons-codicon "nerd-icons")
 (declare-function my/menu "tabs")
 (declare-function evil-define-key "evil-core")
+(defvar lsp-response-timeout)
+(defvar vertico-posframe-poshandler)
+(defvar vertico-posframe-width)
+(defvar vertico-posframe-height)
+(defvar vertico-count)
 
 (defvar my/code-action-timeout 2
   "Seconds to wait for the server's code actions before giving up.")
@@ -43,17 +48,108 @@
 (defun my/code--lsp-p ()
   (and (bound-and-true-p lsp-mode) (fboundp 'lsp-feature?)))
 
+(defun my/code--clean (actions)
+  "ACTIONS (from the server) as a list, disabled ones out, the most useful first."
+  (my/code--sort (seq-remove (lambda (a) (lsp-get a :disabled))
+                             (seq-into (or actions []) 'list))))
+
 (defun my/code--actions ()
-  "The code actions for the selection or point, the most useful first."
+  "The code actions for the selection or point, the most useful first.
+Instant when they were fetched ahead (see the cache below)."
   (when (and (my/code--lsp-p) (lsp-feature? "textDocument/codeAction"))
-    (let* ((lsp-response-timeout my/code-action-timeout)
-           (actions (condition-case nil
-                        (lsp-request "textDocument/codeAction"
-                                     (lsp--text-document-code-action-params))
-                      (error nil))))
-      (my/code--sort
-       (seq-remove (lambda (a) (lsp-get a :disabled))
-                   (seq-into (or actions []) 'list))))))
+    (let ((cached (and (not (use-region-p)) (my/code--cache-get (point)))))
+      (if cached
+          (cdr cached)
+        (let* ((lsp-response-timeout my/code-action-timeout)
+               (actions (my/code--clean
+                         (condition-case nil
+                             (lsp-request "textDocument/codeAction"
+                                          (lsp--text-document-code-action-params))
+                           (error nil)))))
+          (unless (use-region-p) (my/code--cache-put (buffer-chars-modified-tick) (point) actions))
+          actions)))))
+
+;;; asking ahead, so the menu opens at once
+;; ---------------------------------------------------------------------
+;; When the cursor or the mouse rests somewhere in code for a moment, the
+;; actions for that spot are fetched in the background and kept, keyed by
+;; the buffer's edit count and the position.  Typing (a new edit count)
+;; or new diagnostics make them stale.
+
+(defvar my/code-prefetch-delay 0.2 "Idle seconds before asking ahead.")
+
+(defvar-local my/code--cache nil "((TICK . POS) . ACTIONS), newest first.")
+
+(defun my/code--cache-get (pos)
+  "(t . ACTIONS) for POS if they're known for this version of the buffer."
+  (when-let ((hit (assoc (cons (buffer-chars-modified-tick) pos) my/code--cache)))
+    (cons t (cdr hit))))
+
+(defun my/code--cache-put (tick pos actions)
+  (setq my/code--cache (seq-take (cons (cons (cons tick pos) actions)
+                                       (seq-remove (lambda (e) (equal (car e) (cons tick pos)))
+                                                   my/code--cache))
+                                 16)))
+
+(defun my/code--forget (&rest _)
+  "Drop every buffer's cached actions (diagnostics changed)."
+  (dolist (b (buffer-list))
+    (when (buffer-local-value 'my/code--cache b)
+      (with-current-buffer b (setq my/code--cache nil)))))
+
+(defun my/code--prefetch (window pos slot)
+  "Fetch the actions at POS in WINDOW's buffer in the background.
+SLOT (point or mouse): a newer fetch in the same slot cancels the older one."
+  (with-current-buffer (window-buffer window)
+    (when (and pos (my/code--lsp-p)
+               (not (use-region-p))
+               (lsp-feature? "textDocument/codeAction")
+               (not (my/code--cache-get pos)))
+      (let ((buffer (current-buffer))
+            (tick (buffer-chars-modified-tick)))
+        (save-excursion
+          (goto-char pos)
+          (lsp-request-async
+           "textDocument/codeAction" (lsp--text-document-code-action-params)
+           (lambda (actions)
+             (when (buffer-live-p buffer)
+               (with-current-buffer buffer
+                 (my/code--cache-put tick pos (my/code--clean actions)))))
+           :mode 'alive
+           :error-handler #'ignore
+           :cancel-token (intern (format "my/code-prefetch-%s-%s" slot (buffer-name buffer)))))))))
+
+(defun my/code--mouse-spot ()
+  "(WINDOW . POS) of the text under the mouse, or nil."
+  (let* ((mouse (mouse-pixel-position))
+         (frame (car mouse)) (x (cadr mouse)) (y (cddr mouse)))
+    (when (and (frame-live-p frame) x y)
+      (let ((posn (posn-at-x-y x y frame)))
+        (when (and posn (null (posn-area posn)) (window-live-p (posn-window posn))
+                   (integerp (posn-point posn)))
+          (cons (posn-window posn) (posn-point posn)))))))
+
+(defvar my/code--last-spot nil)
+
+(defun my/code--idle ()
+  "When Emacs is idle: ask ahead for where the cursor is and where the mouse rests."
+  (when-let ((idle (current-idle-time)))
+    (when (>= (float-time idle) my/code-prefetch-delay)
+      (ignore-errors
+        (my/code--prefetch (selected-window) (window-point (selected-window)) 'point)
+        (let ((spot (my/code--mouse-spot)))
+          ;; only once the mouse has stopped on a spot
+          (when (and spot (equal spot my/code--last-spot))
+            (my/code--prefetch (car spot) (cdr spot) 'mouse))
+          (setq my/code--last-spot spot))))))
+
+;; a cheap check (no server traffic unless something new needs asking)
+(defvar my/code--idle-timer nil)
+(when (timerp my/code--idle-timer) (cancel-timer my/code--idle-timer))
+(setq my/code--idle-timer (run-at-time 0.25 0.25 #'my/code--idle))
+
+(with-eval-after-load 'lsp-mode
+  (add-hook 'lsp-diagnostics-updated-hook #'my/code--forget))
 
 (defun my/code--kind (action)
   "quickfix, refactor, source, or nil."
