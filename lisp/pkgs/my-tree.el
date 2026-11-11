@@ -206,7 +206,8 @@ on code, open it there."
 ;; the preview while dragging
 
 (defface my/tree-drop-folder '((t)) "The folder something would be dropped into.")
-(defface my/tree-drop-line '((t)) "Where it would land.")
+(defface my/tree-drop-line '((t)) "Where it would land (a line on top of a row).")
+(defface my/tree-drop-line-below '((t)) "Where it would land (under the last row).")
 (defface my/tree-dragged '((t)) "The row being dragged.")
 
 (defvar my/tree--drag-overlays nil)
@@ -279,12 +280,24 @@ aren't shown."
                                               (not (string-prefix-p dir (cdr r)))))
                              rows)))
         (my/tree--overlay (car dir-row) (if after (car after) (point-max)) 'face 'my/tree-drop-folder)))
-    (let ((landing (my/tree--landing from dir rows))
-          (line (propertize "\n" 'face 'my/tree-drop-line)))
-      (cond ((integerp landing)
-             (my/tree--overlay landing landing 'before-string line))
-            ((consp landing)
-             (my/tree--overlay (cdr landing) (cdr landing) 'before-string line))))))
+    ;; a hairline along the top of the row it would go before (nothing
+    ;; moves); past the end of the tree, along the bottom of the last row
+    (let ((landing (my/tree--landing from dir rows)))
+      (pcase landing
+        ((pred integerp) (my/tree--hairline landing 'top))
+        (`(after . ,pos)
+         (if (< pos (point-max))
+             (my/tree--hairline pos 'top)
+           (my/tree--hairline (save-excursion (goto-char (point-max)) (forward-line -1) (point))
+                              'bottom)))))))
+
+(defun my/tree--hairline (pos edge)
+  "A thin accent line along the top (or bottom) EDGE of the row at POS."
+  (save-excursion
+    (goto-char pos)
+    (my/tree--overlay (line-beginning-position) (min (point-max) (1+ (line-end-position)))
+                      'face (if (eq edge 'top) 'my/tree-drop-line 'my/tree-drop-line-below)
+                      'priority 100)))
 
 (defun my/tree--expand (path)
   "Open folder PATH in the tree (while dragging)."
@@ -356,10 +369,11 @@ aren't shown."
     (let ((bg (my/tab--face-color 'default :background "#1e1f22"))
           (fg (my/tab--face-color 'default :foreground "#dfe1e5"))
           (accent (my/tab--face-color 'link :foreground "#56a8f5")))
-      (set-face-attribute 'my/tree-drop-folder nil :background (my/tab--mix accent bg 0.16) :extend t)
-      ;; a thin line: the height of the newline makes the row ~2px tall
-      (set-face-attribute 'my/tree-drop-line nil :background (my/tab--mix accent bg 0.9)
-                          :height 0.12 :extend t)
+      (set-face-attribute 'my/tree-drop-folder nil :background (my/tab--mix accent bg 0.09) :extend t)
+      ;; one pixel, softened: it marks the spot without shouting
+      (set-face-attribute 'my/tree-drop-line nil :overline (my/tab--mix accent bg 0.75) :extend t)
+      (set-face-attribute 'my/tree-drop-line-below nil
+                          :underline (list :color (my/tab--mix accent bg 0.75) :position t) :extend t)
       (set-face-attribute 'my/tree-dragged nil :foreground (my/tab--mix fg bg 0.4)))))
 
 (my/tree-apply-drag-theme)
