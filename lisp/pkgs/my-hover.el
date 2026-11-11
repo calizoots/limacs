@@ -114,9 +114,18 @@
 (declare-function lsp-ui-doc-focus-frame "lsp-ui-doc")
 
 (defun my/hover--mouse-on-popup-p ()
+  "Non-nil while the mouse is over the docs popup."
   (let ((frame (and (fboundp 'lsp-ui-doc--get-frame) (lsp-ui-doc--get-frame))))
-    (and frame (frame-visible-p frame)
-         (eq (car (mouse-position)) frame))))
+    (when (and frame (frame-live-p frame) (frame-visible-p frame))
+      (let* ((mouse (mouse-pixel-position))
+             (on (car mouse)) (x (cadr mouse)) (y (cddr mouse)))
+        (or (eq on frame)
+            ;; reported against the main frame: is it inside the popup's box?
+            (and (eq on (frame-parent frame)) x y
+                 (let* ((pos (frame-position frame))
+                        (left (car pos)) (top (cdr pos)))
+                   (and (<= left x (+ left (frame-pixel-width frame)))
+                        (<= top y (+ top (frame-pixel-height frame)))))))))))
 
 (defun my/hover--cancel-hide (&rest _)
   (when my/hover--hide-timer
@@ -142,7 +151,16 @@
                (lambda (&rest _) (my/hover--hide-later hide))))
       (funcall fn event))))
 
+(defun my/hover--keep-while-on-it (hide &rest args)
+  "Every way lsp-ui closes the popup (window changes, scrolling…) waits
+while the mouse is on it, and happens once it leaves."
+  (if (my/hover--mouse-on-popup-p)
+      (my/hover--hide-later (lambda () (apply hide args)))
+    (my/hover--cancel-hide)
+    (apply hide args)))
+
 (with-eval-after-load 'lsp-ui-doc
+  (advice-add 'lsp-ui-doc--hide-frame :around #'my/hover--keep-while-on-it)
   (advice-add 'lsp-ui-doc--handle-mouse-movement :around #'my/hover--mouse-moved)
   ;; new docs showing: whatever hide was pending is for the old ones
   (advice-add 'lsp-ui-doc--display :before #'my/hover--cancel-hide))
