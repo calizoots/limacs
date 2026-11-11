@@ -428,6 +428,13 @@
           ("Build" my/run-build)
           ("Test" my/run-test)
           ("Run panel" my/run-panel-toggle))))
+    ("Scratch" "new buffer untitled notes temp"
+     ,(lambda ()
+        `(("*scratch*" my/scratch)
+          ("New scratch in this language" my/scratch-new)
+          ("New scratch in…" ,(my/search--do (if (fboundp 'my/with-vertico)
+                                                  (my/with-vertico #'my/scratch-new-in)
+                                                (call-interactively #'my/scratch-new-in)))))))
     ("Theme" "colours colors look dark light" my/load-theme))
   "Quick entries for Search Everywhere: (NAME ALSO-MATCHES ITEMS-OR-COMMAND).")
 
