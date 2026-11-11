@@ -28,6 +28,7 @@
 (require 'tabs)
 (require 'modeline)
 (require 'activity-bar)
+(require 'splash)
 (require 'projects)
 
 ;; runtime

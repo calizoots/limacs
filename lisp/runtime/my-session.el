@@ -449,7 +449,9 @@ SKIPPED-P tells whether a path's drive was skipped."
                              table))))
     (if choice
         (my/session-load choice)
-      (setq my/session--active t))))
+      (setq my/session--active t)
+      ;; a fresh start opens on the Welcome page
+      (when (fboundp 'my/splash-show) (my/splash-show)))))
 
 (defun my/session-pick-popup ()
   "`my/session-pick' in the vertico popup."
