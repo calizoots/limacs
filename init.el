@@ -65,6 +65,7 @@
 (require 'my-music)
 (require 'my-mail)
 (require 'my-search)
+(require 'my-java)
 
 (require 'line-numbers)
 
