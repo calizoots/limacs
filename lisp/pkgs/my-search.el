@@ -389,7 +389,7 @@
           ("Down 10" ,(my/search--vol -10))
           ("Set volume…" my/music-set-volume)
           ("Mute" ,(my/search--do (my/music-set-volume 0))))))
-    ("Music" "play pause song track next previous skip shuffle repeat lyrics"
+    ("Music" "play pause song track next previous skip shuffle repeat lyrics output speakers headphones device"
      ,(lambda ()
         '(("Play / pause" my/music-toggle)
           ("Next song" my/music-next)
@@ -398,6 +398,7 @@
           ("Shuffle on / off" my/music-toggle-shuffle)
           ("Repeat: cycle" my/music-cycle-repeat)
           ("Lyrics" my/music-lyrics)
+          ("Audio output…" my/music-choose-output)
           ("Open the music page" my/music))))
     ("Git" "commit push pull fetch branch stash source control"
      ,(lambda ()

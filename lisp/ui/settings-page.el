@@ -611,6 +611,13 @@
   :doc "Where your library lives (on the pub drive by default)."
   :var 'my/music-directory)
 
+(my/defsetting 'music-output
+  :section "Music" :title "Output" :type 'choice :default nil
+  :doc "Which speakers, headphones or device the music plays through."
+  :choices (lambda () (and (fboundp 'my/music--outputs) (my/music--outputs)))
+  :get (lambda () (bound-and-true-p my/music-output))
+  :set (lambda (name) (when (fboundp 'my/music-set-output) (my/music-set-output name))))
+
 (my/defsetting 'volume-step
   :section "Music" :title "Volume step" :type 'number :min 1 :max 25 :step 1
   :doc "How much louder or quieter one press makes it."

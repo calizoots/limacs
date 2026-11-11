@@ -416,6 +416,65 @@ re-read, and anything gone (or junk) is dropped from the cache."
 (defvar my/music-volume 80
   "Player volume in percent (mpv allows up to 130).")
 
+;; where it plays
+
+(defvar my/music-output nil
+  "mpv's name for the audio output (\"pipewire/…\"), or nil for the system's default.")
+
+(defvar my/music--outputs-cache nil "(TIME . OUTPUTS), so mpv isn't asked every track.")
+
+(defun my/music--outputs (&optional fresh)
+  "The outputs mpv can play to: ((DESCRIPTION . NAME) ...), the default first.
+Each output shows once (mpv lists it under pipewire, pulse and alsa)."
+  (if (and (not fresh) my/music--outputs-cache
+           (< (- (float-time) (car my/music--outputs-cache)) 30))
+      (cdr my/music--outputs-cache)
+    (let* ((all (with-temp-buffer
+                  (ignore-errors (call-process "mpv" nil t nil "--audio-device=help"))
+                  (goto-char (point-min))
+                  (let (out)
+                    (while (re-search-forward "^  '\\([^']+\\)' (\\(.*\\))$" nil t)
+                      (push (cons (match-string 2) (match-string 1)) out))
+                    (nreverse out))))
+           ;; one backend's view of the devices: pipewire if there, else pulse, else all
+           (backend (seq-find (lambda (b) (seq-some (lambda (o) (string-prefix-p (concat b "/") (cdr o))) all))
+                              '("pipewire" "pulse")))
+           (devices (if backend
+                        (seq-filter (lambda (o) (string-prefix-p (concat backend "/") (cdr o))) all)
+                      (seq-remove (lambda (o) (equal (cdr o) "auto")) all)))
+           (outputs (cons (cons "System default" nil) devices)))
+      (setq my/music--outputs-cache (cons (float-time) outputs))
+      outputs)))
+
+(defun my/music--output-label (&optional name)
+  (let ((name (or name my/music-output)))
+    (or (car (rassoc name (my/music--outputs))) (if name name "System default"))))
+
+(defun my/music--output-arg ()
+  "mpv's --audio-device for the chosen output, if it's there right now."
+  (when (and my/music-output (rassoc my/music-output (my/music--outputs)))
+    (list (format "--audio-device=%s" my/music-output))))
+
+(defun my/music-set-output (name)
+  "Play through output NAME (mpv's name, or nil for the system default)."
+  (setq my/music-output name)
+  (when (and (bound-and-true-p emms-player-playing-p) (fboundp 'emms-player-mpv-cmd))
+    ;; moves what's playing now, no restart
+    (emms-player-mpv-cmd `(set_property audio-device ,(or name "auto"))))
+  (my/music--save-state)
+  (ignore-errors (my/music-page-refresh))
+  (message "Playing through %s" (my/music--output-label name)))
+
+(defun my/music-choose-output ()
+  "Pick which speakers / headphones / device the music plays through."
+  (interactive)
+  (let* ((outputs (my/music--outputs t))
+         (labels (mapcar (lambda (o)
+                           (concat (car o) (if (equal (cdr o) my/music-output) "   (now)" "")))
+                         outputs))
+         (pick (completing-read "Play through: " labels nil t)))
+    (my/music-set-output (cdr (nth (seq-position labels pick) outputs)))))
+
 (defun my/music--state-file ()
   (expand-file-name "state.eld" my/music-state-directory))
 
@@ -426,13 +485,16 @@ re-read, and anything gone (or junk) is dropped from the cache."
                      (with-temp-buffer (insert-file-contents file) (read (current-buffer))))))
         (when (numberp (plist-get state :volume))
           (setq my/music-volume (plist-get state :volume)))
+        (when (stringp (plist-get state :output))
+          (setq my/music-output (plist-get state :output)))
         (when (memq (plist-get state :lyrics-prefer) '(ask local online))
           (setq my/music-lyrics-prefer (plist-get state :lyrics-prefer)))))))
 
 (defun my/music--save-state ()
   (make-directory my/music-state-directory t)
   (with-temp-file (my/music--state-file)
-    (prin1 (list :volume my/music-volume :lyrics-prefer my/music-lyrics-prefer)
+    (prin1 (list :volume my/music-volume :lyrics-prefer my/music-lyrics-prefer
+                 :output my/music-output)
            (current-buffer))))
 
 (defun my/music--apply-volume (&rest _)
@@ -2680,6 +2742,7 @@ note: tracks are lists themselves, so playlist rows are tagged with :row."
          :name "music-preview" :noquery t :buffer nil
          :command (append (list "mpv" "--no-video" "--really-quiet"
                                 (format "--volume=%d" my/music-volume))
+                          (my/music--output-arg)
                           (unless from-start (list "--start=25%" "--length=25"))
                           my/music-preview-extra-args
                           (list url))))
@@ -2799,8 +2862,10 @@ note: tracks are lists themselves, so playlist rows are tagged with :row."
   (setq emms-player-list '(emms-player-mpv)
         ;; a function, so mpv starts at the saved volume
         emms-player-mpv-parameters
-        (lambda () (list "--quiet" "--really-quiet" "--no-audio-display" "--no-video"
-                         (format "--volume=%d" my/music-volume)))
+        (lambda () (append (list "--quiet" "--really-quiet" "--no-audio-display" "--no-video"
+                                 (format "--volume=%d" my/music-volume))
+                           ;; the chosen output, when it's plugged in / reachable
+                           (my/music--output-arg)))
         emms-source-file-default-directory my/music-directory
         emms-info-functions '(my/music-info)
         emms-info-asynchronously t
@@ -2928,6 +2993,7 @@ Each item is \"--\" (a separator), (LABEL :sub ITEMS) for a submenu,
     ("Next" my/music-next)
     ("Previous" my/music-previous)
     ("Volume…" my/music-set-volume)
+    (,(format "Output: %s…" (my/music--output-label)) ,(my/music--vertico #'my/music-choose-output))
     "--"
     ("Find a track…" ,(my/music--vertico #'my/music-find))
     ("Library" my/music-library)
