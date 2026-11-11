@@ -28,6 +28,9 @@
 (declare-function neotree-refresh "neotree")
 (declare-function neo-global--window-exists-p "neotree")
 (declare-function neo-global--get-window "neotree")
+(declare-function neo-buffer--expanded-node-p "neotree")
+(declare-function neo-buffer--set-expand "neotree")
+(declare-function neo-buffer--refresh "neotree")
 (declare-function evil-define-key "evil-core")
 (declare-function my/menu "tabs")
 (declare-function my/project-root "projects")
@@ -162,12 +165,31 @@
 ;;; dragging
 ;; ---------------------------------------------------------------------
 
-(defun my/tree-drag (event)
-  "Move what was dragged onto a folder; dropped on code, open it there."
+(defun my/tree--parent (path)
+  (file-name-as-directory (file-name-directory (directory-file-name path))))
+
+(defun my/tree--can-drop-p (from dir)
+  "Non-nil if moving FROM into DIR would do something."
+  (and from dir
+       (not (equal (my/tree--parent from) dir))
+       (not (and (file-directory-p from)
+                 (string-prefix-p (file-name-as-directory (expand-file-name from)) dir)))))
+
+(defun my/tree--drop (from dir)
+  "Move FROM into DIR after asking."
+  (when (and (my/tree--can-drop-p from dir)
+             (y-or-n-p (format "Move %s into %s? " (my/tree--short from) (my/tree--short dir))))
+    (my/tree-move from dir)
+    (my/tree--refresh)
+    (message "Moved %s into %s" (my/tree--short from) (my/tree--short dir))))
+
+(defun my/tree-drag (event &optional from dir)
+  "Move what was dragged (FROM) into DIR, or where EVENT ended; dropped
+on code, open it there."
   (interactive "e")
   (let* ((start (event-start event))
          (end (event-end event))
-         (from (my/tree--path-at (posn-point start)))
+         (from (or from (my/tree--path-at (posn-point start))))
          (end-window (posn-window end)))
     (cond
      ((null from) nil)
@@ -178,33 +200,171 @@
         (select-window end-window)
         (find-file from)))
      (t
-      (let* ((onto (and (posn-point end) (my/tree--path-at (posn-point end))))
-             (dir (my/tree--dir-of (or onto (my/tree--root)))))
-        (unless (equal (file-name-as-directory (file-name-directory (directory-file-name from))) dir)
-          (when (y-or-n-p (format "Move %s into %s? " (my/tree--short from) (my/tree--short dir)))
-            (my/tree-move from dir)
-            (my/tree--refresh)
-            (message "Moved %s into %s" (my/tree--short from) (my/tree--short dir)))))))))
+      (my/tree--drop from (or dir (my/tree--dir-of (or (and (posn-point end) (my/tree--path-at (posn-point end)))
+                                                        (my/tree--root)))))))))
+
+;; the preview while dragging
+
+(defface my/tree-drop-folder '((t)) "The folder something would be dropped into.")
+(defface my/tree-drop-line '((t)) "Where it would land.")
+(defface my/tree-dragged '((t)) "The row being dragged.")
+
+(defvar my/tree--drag-overlays nil)
+
+(defun my/tree--drag-clear ()
+  (mapc #'delete-overlay my/tree--drag-overlays)
+  (setq my/tree--drag-overlays nil))
+
+(defun my/tree--overlay (start end &rest props)
+  (let ((ov (make-overlay start end)))
+    (while props (overlay-put ov (pop props) (pop props)))
+    (push ov my/tree--drag-overlays)
+    ov))
+
+(defun my/tree--rows ()
+  "Every row of the tree: ((START . PATH) ...) top to bottom."
+  (let (rows)
+    (save-excursion
+      (goto-char (point-min))
+      (while (not (eobp))
+        (when-let ((path (neo-buffer--get-filename-current-line)))
+          (push (cons (line-beginning-position) path) rows))
+        (forward-line 1)))
+    (nreverse rows)))
+
+(defun my/tree--sorts-before-p (a a-dir b b-dir)
+  "Non-nil if A (a folder when A-DIR) lists before B: folders first, then by name."
+  (if (eq (and a-dir t) (and b-dir t))
+      (funcall (or (bound-and-true-p neo-filepath-sort-function) #'string<) a b)
+    a-dir))
+
+(defun my/tree--landing (from dir rows)
+  "Where in ROWS FROM would show inside DIR: the row it'd go before, or
+\='(after . POS) past the last of DIR's rows, or nil when DIR's contents
+aren't shown."
+  (let* ((name (my/tree--short from))
+         (from-dir (file-directory-p from))
+         (children (seq-filter (lambda (r) (equal (my/tree--parent (cdr r)) dir)) rows))
+         (dir-row (seq-find (lambda (r) (equal (file-name-as-directory (cdr r)) dir)) rows))
+         (root-p (equal dir (file-name-as-directory (my/tree--root)))))
+    (cond
+     ;; a folder that's open (or the root): between its children
+     ((or children root-p
+          (and dir-row (neo-buffer--expanded-node-p (directory-file-name (cdr dir-row)))))
+      (or (car (seq-find (lambda (r)
+                           (and (not (equal (cdr r) from))
+                                (my/tree--sorts-before-p name from-dir
+                                                         (my/tree--short (cdr r)) (file-directory-p (cdr r)))))
+                         children))
+          ;; after the last thing inside DIR (its last child's own contents too)
+          (let ((last (or (car (last children)) dir-row)))
+            (when last
+              (let ((after (seq-find (lambda (r) (and (> (car r) (car last))
+                                                      (not (string-prefix-p (file-name-as-directory (cdr last)) (cdr r)))))
+                                     rows)))
+                (cons 'after (if after (car after) (point-max))))))))
+     (t nil))))
+
+(defun my/tree--drag-show (from dir rows)
+  "Preview dropping FROM into DIR: tint the folder, draw a line where it'd land."
+  (my/tree--drag-clear)
+  (when-let ((from-row (seq-find (lambda (r) (equal (cdr r) from)) rows)))
+    (save-excursion
+      (goto-char (car from-row))
+      (my/tree--overlay (line-beginning-position) (line-end-position) 'face 'my/tree-dragged)))
+  (when (my/tree--can-drop-p from dir)
+    ;; the folder and everything shown inside it
+    (when-let ((dir-row (seq-find (lambda (r) (equal (file-name-as-directory (cdr r)) dir)) rows)))
+      (let ((after (seq-find (lambda (r) (and (> (car r) (car dir-row))
+                                              (not (string-prefix-p dir (cdr r)))))
+                             rows)))
+        (my/tree--overlay (car dir-row) (if after (car after) (point-max)) 'face 'my/tree-drop-folder)))
+    (let ((landing (my/tree--landing from dir rows))
+          (line (propertize "\n" 'face 'my/tree-drop-line)))
+      (cond ((integerp landing)
+             (my/tree--overlay landing landing 'before-string line))
+            ((consp landing)
+             (my/tree--overlay (cdr landing) (cdr landing) 'before-string line))))))
+
+(defun my/tree--expand (path)
+  "Open folder PATH in the tree (while dragging)."
+  (neo-buffer--set-expand (directory-file-name path) t)
+  (neo-buffer--refresh t))
+
+(defun my/tree--collapse (path)
+  (neo-buffer--set-expand (directory-file-name path) nil)
+  (neo-buffer--refresh t))
+
+(defvar my/tree-spring-delay 0.45 "Seconds resting on a closed folder before it opens mid-drag.")
 
 (defun my/tree-mouse-down (event)
-  "Press on a name: a drag moves it, a plain click opens it as always."
+  "Press on a name: a drag moves it (with a preview), a click opens it."
   (interactive "e")
   ;; neotree opens the line point is on, so be on the clicked line
   (mouse-set-point event)
-  (let ((up (track-mouse
-              (let (ev)
-                (while (progn (setq ev (read-event)) (mouse-movement-p ev)))
-                ev))))
+  (let* ((window (posn-window (event-start event)))
+         (from (my/tree--path-at (posn-point (event-start event))))
+         (root (file-name-as-directory (my/tree--root)))
+         (dir nil) (hover nil) (hover-since 0) (opened nil) (dragging nil) up)
+    (unwind-protect
+        (track-mouse
+          (while (not up)
+            (let ((ev (read-event nil nil 0.1)))
+              (cond
+               ;; resting: a closed folder under the mouse springs open
+               ((null ev)
+                (when (and dragging hover (file-directory-p hover)
+                           (not (neo-buffer--expanded-node-p (directory-file-name hover)))
+                           (> (- (float-time) hover-since) my/tree-spring-delay)
+                           (my/tree--can-drop-p from (file-name-as-directory hover)))
+                  (my/tree--expand hover)
+                  (push hover opened)
+                  (my/tree--drag-show from dir (my/tree--rows))))
+               ((mouse-movement-p ev)
+                (setq dragging t)
+                (let ((posn (event-start ev)))
+                  (if (and (eq (posn-window posn) window) (posn-point posn))
+                      (let* ((onto (my/tree--path-at (posn-point posn)))
+                             (folder (and onto (file-directory-p onto) onto)))
+                        (setq dir (my/tree--dir-of (or onto root)))
+                        (unless (equal folder hover) (setq hover folder hover-since (float-time)))
+                        (my/tree--drag-show from dir (my/tree--rows)))
+                    ;; over the code: no landing line in the tree
+                    (setq hover nil dir nil)
+                    (my/tree--drag-clear))))
+               (t (setq up ev))))))
+      (my/tree--drag-clear))
     (cond
      ;; moved while held: a drag
      ((and (consp up) (memq 'drag (event-modifiers up)))
-      (my/tree-drag up))
+      (my/tree-drag up from (and (eq (posn-window (event-end up)) window) dir))
+      ;; folders that only opened on the way close again
+      (when (window-live-p window)
+        (with-selected-window window
+          (dolist (f opened)
+            (unless (and dir (string-prefix-p (file-name-as-directory f) dir))
+              (ignore-errors (my/tree--collapse f)))))))
      ;; let go where it started: a click, which buttons take as mouse-2
      ((and (consp up) (memq 'click (event-modifiers up)))
       (setq unread-command-events
             (cons (cons 'mouse-2 (cdr up)) unread-command-events)))
      ;; anything else (a key pressed mid-click): leave it be
      (up (push up unread-command-events)))))
+
+(defun my/tree-apply-drag-theme (&rest _)
+  (when (fboundp 'my/tab--mix)
+    (let ((bg (my/tab--face-color 'default :background "#1e1f22"))
+          (fg (my/tab--face-color 'default :foreground "#dfe1e5"))
+          (accent (my/tab--face-color 'link :foreground "#56a8f5")))
+      (set-face-attribute 'my/tree-drop-folder nil :background (my/tab--mix accent bg 0.16) :extend t)
+      ;; a thin line: the height of the newline makes the row ~2px tall
+      (set-face-attribute 'my/tree-drop-line nil :background (my/tab--mix accent bg 0.9)
+                          :height 0.12 :extend t)
+      (set-face-attribute 'my/tree-dragged nil :foreground (my/tab--mix fg bg 0.4)))))
+
+(my/tree-apply-drag-theme)
+(dolist (fn '(load-theme enable-theme disable-theme))
+  (advice-add fn :after #'my/tree-apply-drag-theme))
 
 ;;; the commands
 ;; ---------------------------------------------------------------------

@@ -85,3 +85,38 @@
       (should (equal (my/tree--dir-of (expand-file-name "src" dir)) (expand-file-name "src/" dir))))))
 
 ;;; test-tree.el ends here
+
+;;; the drag preview's landing spot
+
+(ert-deftest tree/folders-sort-before-files-then-by-name ()
+  (should (my/tree--sorts-before-p "zeta" t "alpha.rs" nil))
+  (should-not (my/tree--sorts-before-p "alpha.rs" nil "zeta" t))
+  (should (my/tree--sorts-before-p "lib.rs" nil "z.rs" nil))
+  (should-not (my/tree--sorts-before-p "lib.rs" nil "a.rs" nil)))
+
+(ert-deftest tree/no-drop-where-it-already-is-or-into-itself ()
+  (my-test-with-dir dir
+    (let ((src (expand-file-name "src/" dir))
+          (old (expand-file-name "old/" dir)))
+      (make-directory (expand-file-name "src/inner" dir) t)
+      (make-directory old)
+      (let ((lib (my-test-write dir "src/lib.rs" "x")))
+        (should-not (my/tree--can-drop-p lib src))
+        (should (my/tree--can-drop-p lib old))
+        (should-not (my/tree--can-drop-p (directory-file-name src) (expand-file-name "src/inner/" dir)))))))
+
+(ert-deftest tree/landing-line-goes-between-by-name ()
+  (my-test-with-dir dir
+    (dolist (f '("old/a.rs" "old/z.rs" "src/lib.rs")) (my-test-write dir f "x"))
+    (let* ((old (expand-file-name "old" dir))
+           (rows (list (cons 10 old)
+                       (cons 20 (expand-file-name "old/a.rs" dir))
+                       (cons 30 (expand-file-name "old/z.rs" dir))
+                       (cons 40 (expand-file-name "src" dir)))))
+      (cl-letf (((symbol-function 'neo-buffer--expanded-node-p) (lambda (p) (equal p old)))
+                ((symbol-function 'my/tree--root) (lambda () dir)))
+        ;; lib.rs lands before z.rs
+        (should (equal (my/tree--landing (expand-file-name "src/lib.rs" dir) (file-name-as-directory old) rows) 30))
+        ;; zz.rs goes after the last child: before src's row
+        (should (equal (my/tree--landing (expand-file-name "src/zz.rs" dir) (file-name-as-directory old) rows)
+                       '(after . 40)))))))
