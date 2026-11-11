@@ -43,6 +43,7 @@
 ;; treesitter
 
 (require 'my-treesit)
+(require 'my-code)
 
 ;; my packages
 
