@@ -279,7 +279,7 @@ Files with errors come first; inside a file, by severity then line."
                    'my/problems-key (list 'item file (plist-get p :line) (plist-get p :col)
                                           (plist-get p :message))))))))
         (when (zerop shown)
-          (insert "\n   " (my/problems--empty-icon) "  "
+          (insert "   " (my/problems--empty-icon) "  "
                   (propertize (cond (my/problems--filter "Nothing matches the filter.")
                                     (groups "Everything here is hidden by the filters in the title bar.")
                                     (t "No problems have been detected in this project."))
