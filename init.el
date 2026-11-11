@@ -59,6 +59,7 @@
 (require 'my-orderless)
 (require 'my-which-key)
 (require 'my-neotree)
+(require 'my-tree)
 (require 'my-smartparens)
 (require 'my-all-the-icons)
 (require 'my-consult)
