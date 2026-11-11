@@ -70,5 +70,7 @@
 (require 'my-java)
 
 (require 'line-numbers)
+;; last: it reads every module's defaults, then puts back what you changed
+(require 'settings-page)
 
 ;;; init.el ends here

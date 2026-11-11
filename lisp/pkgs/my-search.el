@@ -435,7 +435,8 @@
           ("New scratch in…" ,(my/search--do (if (fboundp 'my/with-vertico)
                                                   (my/with-vertico #'my/scratch-new-in)
                                                 (call-interactively #'my/scratch-new-in)))))))
-    ("Theme" "colours colors look dark light" my/load-theme))
+    ("Theme" "colours colors look dark light" my/load-theme)
+    ("Settings" "preferences options config font size line numbers" my/settings-open))
   "Quick entries for Search Everywhere: (NAME ALSO-MATCHES ITEMS-OR-COMMAND).")
 
 (defun my/search--quick-items (items)

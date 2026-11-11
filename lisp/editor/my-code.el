@@ -133,7 +133,7 @@ SLOT (point or mouse): a newer fetch in the same slot cancels the older one."
 
 (defun my/code--idle ()
   "When Emacs is idle: ask ahead for where the cursor is and where the mouse rests."
-  (when-let ((idle (current-idle-time)))
+  (when-let ((idle (and (numberp my/code-prefetch-delay) (current-idle-time))))
     (when (>= (float-time idle) my/code-prefetch-delay)
       (ignore-errors
         (my/code--prefetch (selected-window) (window-point (selected-window)) 'point)
