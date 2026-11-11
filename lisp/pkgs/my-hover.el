@@ -107,6 +107,8 @@
 
 (defvar my/hover-grace 0.6 "Seconds to reach the popup after leaving the word.")
 (defvar my/hover--hide-timer nil)
+(defvar my/hover--entered nil "Non-nil once the mouse has been on the current popup.")
+(defvar my/hover--watch-timer nil "Checks often while the mouse is on the popup.")
 
 (declare-function lsp-ui-doc--hide-frame "lsp-ui-doc")
 (declare-function lsp-ui-doc--get-frame "lsp-ui-doc")
@@ -130,19 +132,47 @@
 (defun my/hover--cancel-hide (&rest _)
   (when my/hover--hide-timer
     (cancel-timer my/hover--hide-timer)
-    (setq my/hover--hide-timer nil)))
+    (setq my/hover--hide-timer nil))
+  (when my/hover--watch-timer
+    (cancel-timer my/hover--watch-timer)
+    (setq my/hover--watch-timer nil)))
+
+(defun my/hover--new-popup (&rest _)
+  "New docs showing: forget the old popup's state."
+  (my/hover--cancel-hide)
+  (setq my/hover--entered nil))
+
+(defun my/hover--watch (hide)
+  "The mouse is on the popup: run HIDE the moment it leaves."
+  (setq my/hover--entered t)
+  (unless my/hover--watch-timer
+    (setq my/hover--watch-timer
+          (run-at-time 0.05 0.05
+                       (lambda ()
+                         (unless (my/hover--mouse-on-popup-p)
+                           (my/hover--cancel-hide)
+                           (setq my/hover--entered nil)
+                           (funcall hide)))))))
 
 (defun my/hover--hide-later (hide)
-  "Run HIDE (lsp-ui's) unless the mouse makes it onto the popup first."
-  (my/hover--cancel-hide)
-  (setq my/hover--hide-timer
-        (run-at-time my/hover-grace nil
-                     (lambda ()
-                       (setq my/hover--hide-timer nil)
-                       (if (my/hover--mouse-on-popup-p)
-                           ;; on the popup: look again once it's left
-                           (my/hover--hide-later hide)
-                         (funcall hide))))))
+  "Run HIDE (lsp-ui's) unless the mouse makes it onto the popup first.
+Once it has been on the popup, leaving it hides at once."
+  (cond
+   ((my/hover--mouse-on-popup-p) (my/hover--watch hide))
+   ;; it was on the popup and has left: no grace this time
+   (my/hover--entered
+    (my/hover--cancel-hide)
+    (setq my/hover--entered nil)
+    (funcall hide))
+   (t
+    (my/hover--cancel-hide)
+    (setq my/hover--hide-timer
+          (run-at-time my/hover-grace nil
+                       (lambda ()
+                         (setq my/hover--hide-timer nil)
+                         (if (my/hover--mouse-on-popup-p)
+                             (my/hover--watch hide)
+                           (funcall hide))))))))
 
 (defun my/hover--mouse-moved (fn event)
   "lsp-ui's mouse handler (FN), with its hiding put off."
@@ -163,7 +193,7 @@ while the mouse is on it, and happens once it leaves."
   (advice-add 'lsp-ui-doc--hide-frame :around #'my/hover--keep-while-on-it)
   (advice-add 'lsp-ui-doc--handle-mouse-movement :around #'my/hover--mouse-moved)
   ;; new docs showing: whatever hide was pending is for the old ones
-  (advice-add 'lsp-ui-doc--display :before #'my/hover--cancel-hide))
+  (advice-add 'lsp-ui-doc--display :before #'my/hover--new-popup))
 
 (defun my/hover-docs ()
   "The docs for the symbol at the cursor, in the same popup as hovering.

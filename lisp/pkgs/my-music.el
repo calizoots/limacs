@@ -1098,7 +1098,7 @@ file is named and tagged with those instead of the uploader's."
 (defun my/music-help ()
   "Show every key on the music page."
   (interactive)
-  (message (concat "RET play/load  p pause  ] [ next/prev  > < seek  + - = volume  "
+  (message (concat "RET play/load  p pause  ] [ next/prev  > < seek  + - = volume  O output  "
                    "/ find&play  a add  u link  o online  D download link  "
                    "d remove  J K move  c clear  w save playlist  "
                    "s shuffle queue  S shuffle mode  r repeat  l library  A artist  "
@@ -3196,6 +3196,7 @@ Each item is \"--\" (a separator), (LABEL :sub ITEMS) for a submenu,
 
   (evil-define-key 'normal my/music-mode-map
     (kbd "RET") #'my/music-page-open
+    "O" (my/music--vertico #'my/music-choose-output)
     "p" #'my/music-toggle
     "]" #'my/music-next
     "[" #'my/music-previous
@@ -3268,7 +3269,8 @@ Each item is \"--\" (a separator), (LABEL :sub ITEMS) for a submenu,
     (kbd "<leader>mL") #'my/music-lyrics
     (kbd "<leader>me") #'my/music-edit-lyrics
     (kbd "<leader>mt") #'my/music-edit-tags
-    (kbd "<leader>mY") #'my/music-lyrics-fetch-all)
+    (kbd "<leader>mY") #'my/music-lyrics-fetch-all
+    (kbd "<leader>md") (my/music--vertico #'my/music-choose-output))
 
   (evil-set-initial-state 'my/music-lyrics-mode 'normal)
   (evil-define-key 'normal my/music-lyrics-mode-map
@@ -3358,7 +3360,8 @@ Each item is \"--\" (a separator), (LABEL :sub ITEMS) for a submenu,
     (add-to-list 'vertico-multiform-commands (list cmd 'posframe))))
 
 (with-eval-after-load 'which-key
-  (which-key-add-key-based-replacements "SPC m" "music"))
+  (which-key-add-key-based-replacements "SPC m" "music")
+  (which-key-add-key-based-replacements "SPC m d" "output device"))
 
 (provide 'my-music)
 
