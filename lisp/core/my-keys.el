@@ -91,7 +91,7 @@
   ;; flycheck
 
   (with-eval-after-load 'flycheck
-    (evil-define-key 'normal 'global (kbd "<leader>xw") #'flycheck-list-errors))
+    (evil-define-key 'normal 'global (kbd "<leader>xw") #'my/problems-toggle-panel))
 
   ;; nerd commenter
 

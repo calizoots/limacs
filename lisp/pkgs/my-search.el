@@ -436,6 +436,7 @@
                                                   (my/with-vertico #'my/scratch-new-in)
                                                 (call-interactively #'my/scratch-new-in)))))))
     ("Theme" "colours colors look dark light" my/load-theme)
+    ("Problems" "errors warnings diagnostics lint" my/problems-toggle-panel)
     ("Settings" "preferences options config font size line numbers" my/settings-open))
   "Quick entries for Search Everywhere: (NAME ALSO-MATCHES ITEMS-OR-COMMAND).")
 

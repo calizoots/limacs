@@ -141,7 +141,7 @@ click commands are made afresh on every redisplay.")
     ("Run panel" my/run-panel-toggle :keys "SPC r p" :enable (fboundp 'my/run-panel-toggle))
     ("Containers" my/containers-panel-toggle :keys "SPC d d" :enable (fboundp 'my/containers-panel-toggle))
     ("Services" my/services-open-tab :keys "SPC r S" :enable (fboundp 'my/services-open-tab))
-    ("Problems" flycheck-list-errors :keys "SPC x w" :enable (fboundp 'flycheck-list-errors))
+    ("Problems" my/problems-toggle-panel :keys "SPC x w" :enable (fboundp 'my/problems-toggle-panel))
     ("Terminal" ghostel :keys "SPC v t" :enable (fboundp 'ghostel))
     "--"
     ("Music" my/music :keys "SPC m m" :enable (fboundp 'my/music))
@@ -217,7 +217,7 @@ click commands are made afresh on every redisplay.")
     ("Services" my/services-open-tab :keys "SPC r S")))
 
 (defun my/ml--problem-items ()
-  `(("All problems" flycheck-list-errors :keys "SPC x w")
+  `(("All problems in the project" my/problems-toggle-panel :keys "SPC x w")
     ("Next problem" flycheck-next-error :keys "] e")
     ("Previous problem" flycheck-previous-error :keys "[ e")
     "--"
@@ -404,7 +404,7 @@ Less important segments disappear first as a window gets narrower."
                      "  "
                      (propertize (format "⚠ %d" warnings) 'face (if (> warnings 0) 'my/ml-warning 'my/ml-dim))))
            "Click: list problems (SPC x w)"
-           #'flycheck-list-errors #'my/ml--problem-items)
+           #'my/problems-toggle-panel #'my/ml--problem-items)
           "   ")))
       (_ nil))))
 

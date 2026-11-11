@@ -148,15 +148,12 @@ so nothing opens by splitting the tree."
 ;; problems
 
 (defun my/activity-problems-p ()
-  (get-buffer-window "*Flycheck errors*"))
+  (and (fboundp 'my/problems-p) (my/problems-p)))
 
 (defun my/activity-problems ()
+  "Show or hide the Problems panel (every problem in the project)."
   (interactive)
-  (if-let ((window (my/activity-problems-p)))
-      (delete-window window)
-    (if (bound-and-true-p flycheck-mode)
-        (flycheck-list-errors)
-      (user-error "No checker in this buffer"))))
+  (my/problems-toggle-panel))
 
 ;; terminal, at the bottom of the tab
 
@@ -424,6 +421,7 @@ so nothing opens by splitting the tree."
             ((window-parameter window 'my-activity-terminal) 'terminal)
             ((window-parameter window 'my-run-panel) 'run)
             ((window-parameter window 'my-containers-panel) 'containers)
+            ((window-parameter window 'my-problems-panel) 'problems)
             ((derived-mode-p 'flycheck-error-list-mode) 'problems)))))
 
 (defun my/panel--title (kind)
@@ -475,11 +473,14 @@ so nothing opens by splitting the tree."
                  (my/panel--button (my/panel--icon "nf-cod-close" "✕") "Close" #'my/panel-close))))))
 
 (defun my/panel--extra-buttons (kind)
-  "Buttons of KIND's own before the shared ones (Source Control: commit, refresh, ⋯)."
-  (mapconcat (lambda (b) (apply #'my/panel--button b))
-             (pcase kind
-               ('git (and (fboundp 'my/git-title-buttons) (my/git-title-buttons))))
-             ""))
+  "Buttons of KIND's own before the shared ones (Source Control: commit,
+refresh, ⋯; Problems: its counts, which filter)."
+  (pcase kind
+    ('git (mapconcat (lambda (b) (apply #'my/panel--button b))
+                     (and (fboundp 'my/git-title-buttons) (my/git-title-buttons))
+                     ""))
+    ('problems (if (fboundp 'my/problems-title) (concat (my/problems-title) "   ") ""))
+    (_ "")))
 
 (defun my/panel--right (buttons)
   "BUTTONS pushed flush against the right edge (measured in pixels)."
@@ -586,6 +587,7 @@ so nothing opens by splitting the tree."
        (set-window-parameter window 'no-delete-other-windows t)
        (set-window-dedicated-p window t)
        (select-window window)))
+    ('problems (select-window (my/problems--display buffer)))
     (_ (select-window (display-buffer-in-side-window buffer '((side . bottom) (slot . 1)))))))
 
 (defun my/panel-back (&optional window)

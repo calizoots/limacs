@@ -29,6 +29,7 @@
 (require 'modeline)
 (require 'activity-bar)
 (require 'splash)
+(require 'problems)
 (require 'projects)
 
 ;; runtime
