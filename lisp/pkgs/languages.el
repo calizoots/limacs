@@ -1,6 +1,7 @@
 ;;; pkgs/languages.el
 
 (use-package emmet-mode
+  :ensure t
   :hook ((web-mode . emmet-mode)
          (tsx-ts-mode . emmet-mode)
          (js-ts-mode . emmet-mode))
@@ -29,11 +30,19 @@
   (setq web-mode-enable-auto-closing t)
   (setq web-mode-enable-auto-pairing t)
   (setq web-mode-enable-auto-expanding t)
+  ;; typing <div> adds </div> straight away (like VS Code), not only on </
+  (setq web-mode-auto-close-style 2)
   (setq indent-tabs-mode nil)
   (setq tab-width 4)
-  (setq sgml-basic-offset 4)
-  (my/after '(evil-mode simplezen)
-    (define-key evil-insert-state-map (kbd "TAB") 'simplezen-expand)))
+  (setq sgml-basic-offset 4))
+
+;; TAB expands div.box>p*2 style abbreviations in HTML (and indents
+;; otherwise), in HTML buffers only
+(with-eval-after-load 'web-mode
+  (with-eval-after-load 'evil
+    (evil-define-key 'insert web-mode-map
+      (kbd "TAB") #'simplezen-expand-or-indent-for-tab
+      (kbd "<tab>") #'simplezen-expand-or-indent-for-tab)))
 
 (with-eval-after-load 'web-mode
   (add-hook 'web-mode-hook #'my/web-mode-setup))
