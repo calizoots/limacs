@@ -77,7 +77,7 @@
 
   (with-eval-after-load 'lsp-mode
     (evil-define-key 'normal 'global
-      (kbd "K") #'lsp-describe-thing-at-point)
+      (kbd "K") #'my/hover-docs)
 
     (evil-define-key 'normal 'global
       (kbd "<leader> r n") #'lsp-rename)

@@ -256,7 +256,7 @@ SLOT (point or mouse): a newer fetch in the same slot cancels the older one."
              :enable ,(my/code--has "textDocument/implementation"))
             ("Find references" lsp-find-references :keys "SPC c R"
              :enable ,(my/code--has "textDocument/references"))
-            ("Show documentation" lsp-describe-thing-at-point :keys "K"
+            ("Show documentation" my/hover-docs :keys "K"
              :enable ,(my/code--has "textDocument/hover"))
             "--"
             ("Rename symbol…" lsp-rename :keys "SPC c r"

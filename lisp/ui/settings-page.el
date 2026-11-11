@@ -552,6 +552,18 @@
   :get (lambda () (numberp (bound-and-true-p my/code-prefetch-delay)))
   :set (lambda (on) (setq my/code-prefetch-delay (and on 0.2))))
 
+(my/defsetting 'hover-docs
+  :section "Editor" :title "Hover docs" :type 'toggle :default t
+  :doc "Rest the mouse on a symbol to see its signature and docs."
+  :get (lambda () (if (boundp 'lsp-ui-doc-show-with-mouse) lsp-ui-doc-show-with-mouse t))
+  :set (lambda (on) (when (fboundp 'my/hover-set-mouse) (my/hover-set-mouse on))))
+
+(my/defsetting 'hover-delay
+  :section "Editor" :title "Hover delay (seconds)" :type 'number :min 0.1 :max 2.0 :step 0.1 :default 0.5
+  :doc "How long the mouse rests before the docs show."
+  :get (lambda () (if (boundp 'lsp-ui-doc-delay) lsp-ui-doc-delay 0.5))
+  :set (lambda (v) (setq lsp-ui-doc-delay v)))
+
 (my/defsetting 'code-menu-actions
   :section "Editor" :title "Actions in the right-click menu" :type 'number :min 3 :max 30 :step 1
   :doc "How many code actions show before the rest go under More."

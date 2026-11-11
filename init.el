@@ -47,6 +47,7 @@
 
 (require 'my-treesit)
 (require 'my-code)
+(require 'my-hover)
 
 ;; my packages
 
